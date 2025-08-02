@@ -92,6 +92,10 @@ def webhook():
         # Проверяем наличие записи в shops для этого chat_id
         shop_exists = check_shop_exists_for_chat(chat_id)
         
+        # Если записи нет - уведомляем пользователя
+        if not shop_exists:
+            send_message(chat_id, "У вас нет зарегистрированных магазинов.")
+        
         if text == "/start":
             if shop_exists:
                 send_message(chat_id, "Привет, это я бот! У вас есть зарегистрированный магазин.")
@@ -113,11 +117,8 @@ def webhook():
         
         elif text:
             if shop_exists:
-                response_text = f"Привет, @{username}! Вы написали: {text}\nУ вас есть зарегистрированный магазин."
-            else:
-                response_text = f"Привет, @{username}! Вы написали: {text}\nУ вас нет зарегистрированных магазинов."
-            
-            send_message(chat_id, response_text)
+                send_message(chat_id, f"Привет, @{username}! Вы написали: {text}")
+            # Если магазина нет, сообщение уже отправлено выше
     
     return "ok"
 
