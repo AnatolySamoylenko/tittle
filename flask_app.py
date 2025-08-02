@@ -1,7 +1,9 @@
+# flask_app.py
 from flask import Flask, request
 import requests
 import os
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import inspect
 
 app = Flask(__name__)
 
@@ -13,9 +15,41 @@ db = SQLAlchemy(app)
 
 # Модель пользователя
 class User(db.Model):
+    __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     chat_id = db.Column(db.String(50), unique=True)
     username = db.Column(db.String(100))
+
+# Модель магазина
+class Shop(db.Model):
+    __tablename__ = 'shops'
+    shopId = db.Column(db.Integer, primary_key=True, autoincrement=False)
+    API = db.Column(db.Text, nullable=False)
+    chatId = db.Column(db.Integer, nullable=False)
+
+# Функция для проверки и инициализации базы данных
+def initialize_database():
+    with app.app_context():
+        inspector = inspect(db.engine)
+        existing_tables = inspector.get_table_names()
+
+        if 'shops' not in existing_tables:
+            print("Таблица 'shops' не найдена. Создаём...")
+            try:
+                db.create_all()
+                print("Таблица 'shops' успешно создана.")
+            except Exception as e:
+                print(f"Ошибка при создании таблицы 'shops': {e}")
+        else:
+            print("Таблица 'shops' уже существует.")
+
+        if 'users' not in existing_tables:
+            print("Таблица 'users' не найдена. Создаём...")
+            try:
+                db.create_all()
+                print("Таблица 'users' успешно создана.")
+            except Exception as e:
+                print(f"Ошибка при создании таблицы 'users': {e}")
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'ваш_токен_здесь_для_теста')
 
@@ -27,49 +61,82 @@ def send_message(chat_id, text):
     }
     requests.post(url, json=payload)
 
+# Функция для проверки наличия записи в shops по chatId
+def check_shop_exists_for_chat(chat_id):
+    """Проверяет, есть ли запись в таблице shops для данного chat_id"""
+    try:
+        with app.app_context():
+            # Проверяем, существует ли таблица shops
+            inspector = inspect(db.engine)
+            if 'shops' not in inspector.get_table_names():
+                print("Таблица 'shops' не существует.")
+                return False
+            
+            # Проверяем наличие записи
+            shop_exists = db.session.query(Shop).filter_by(chatId=chat_id).first() is not None
+            return shop_exists
+    except Exception as e:
+        print(f"Ошибка при проверке наличия магазина: {e}")
+        return False
+
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     data = request.get_json()
     
-    # Проверяем, является ли сообщение командой
-    if "message" in data:
+    if "message" in 
         message = data["message"]
         chat_id = message["chat"]["id"]
         text = message.get("text", "")
         username = message.get("from", {}).get("username", "Неизвестный")
         
-        # Обработка команды /start
+        # Проверяем наличие записи в shops для этого chat_id
+        shop_exists = check_shop_exists_for_chat(chat_id)
+        
         if text == "/start":
-            send_message(chat_id, "Привет, это я бот!")
+            if shop_exists:
+                send_message(chat_id, "Привет, это я бот! У вас есть зарегистрированный магазин.")
+            else:
+                send_message(chat_id, "Привет, это я бот! У вас пока нет зарегистрированных магазинов.")
             
             # Сохраняем нового пользователя в БД
             with app.app_context():
                 user = User.query.filter_by(chat_id=str(chat_id)).first()
                 if not user:
                     user = User(chat_id=str(chat_id), username=username)
-                    db.session.add(user)
-                    db.session.commit()
+                    try:
+                        db.session.add(user)
+                        db.session.commit()
+                        print(f"Пользователь {username} ({chat_id}) добавлен в БД.")
+                    except Exception as e:
+                        db.session.rollback()
+                        print(f"Ошибка при добавлении пользователя: {e}")
         
-        # Обработка обычных сообщений
         elif text:
-            with app.app_context():
-                user = User.query.filter_by(chat_id=str(chat_id)).first()
-                if not user:
-                    user = User(chat_id=str(chat_id), username=username)
-                    db.session.add(user)
-                    db.session.commit()
+            if shop_exists:
+                response_text = f"Привет, @{username}! Вы написали: {text}\nУ вас есть зарегистрированный магазин."
+            else:
+                response_text = f"Привет, @{username}! Вы написали: {text}\nУ вас нет зарегистрированных магазинов."
             
-            send_message(chat_id, f"Привет, @{username}! Вы написали: {text}")
+            send_message(chat_id, response_text)
     
     return "ok"
 
 @app.route("/")
 def index():
-    with app.app_context():
-        users_count = User.query.count()
-    return f"<h1>Бот работает!</h1><p>Пользователей в базе: {users_count}</p>"
+    try:
+        with app.app_context():
+            users_count = User.query.count()
+            inspector = inspect(db.engine)
+            if 'shops' in inspector.get_table_names():
+                shops_count = Shop.query.count()
+            else:
+                shops_count = 0
+        return f"<h1>Бот работает!</h1><p>Пользователей в базе: {users_count}</p><p>Магазинов в базе: {shops_count}</p>"
+    except Exception as e:
+        return f"<h1>Ошибка</h1><p>{str(e)}</p>", 500
+
+# Инициализация базы данных
+initialize_database()
 
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)
