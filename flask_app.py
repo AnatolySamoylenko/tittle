@@ -9,6 +9,7 @@ import json
 import random
 import threading
 from io import BytesIO
+from urllib.parse import quote_plus
 
 import requests
 import pandas as pd
@@ -249,8 +250,6 @@ def process_phrases_from_xlsx(df, chat_id):
     with app.app_context():
         try:
             # --- ИЗМЕНЕНО: Итерируемся по ВСЕМ строкам data_slice, начиная с индекса 0 ---
-            # В предыдущей версии было: for index, row in data_slice.iloc[2:, :].iterrows():
-            # Теперь: for index, row in data_slice.iterrows():
             for index, row in data_slice.iterrows():
                 processed_count += 1
                 try:
@@ -380,9 +379,11 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
         return f"Ошибка: {str(e)}"
 
 # --- НОВАЯ ФУНКЦИЯ: Логика команды /searchads с персональными таблицами ---
+# ИМИТИРУЕТ работу браузера при запросах к search.wb.ru
 def search_ads_task(chat_id):
     """
     Фоновая задача для выполнения поисковых запросов и обновления данных в ПЕРСОНАЛЬНОЙ БД.
+    ИМИТИРУЕТ работу браузера при запросах к search.wb.ru.
     """
     logger.info(f"Запуск задачи search_ads для пользователя chat_id: {chat_id}")
     send_message(chat_id, f"Начинаю выполнение /searchads. Это может занять некоторое время...")
@@ -400,140 +401,218 @@ def search_ads_task(chat_id):
 
             # --- ИЗМЕНЕНО: Обновлен URL и параметры запроса ---
             base_url = "https://search.wb.ru/exactmatch/ru/common/v14/search"
-            params_template = {
-                "ab_testing": "false",
-                "appType": "32",
-                "curr": "rub",
-                "dest": "-1257484",
-                "lang": "ru",
-                "page": "1", # Изменено с 8 на 1
-                "resultset": "catalog",
-                "sort": "popular",
-                "spp": "99", # Изменено с 30 на 99
-                "suppressSpellcheck": "false",
-                "uclusters": "0", # Новый параметр
-                "uiv": "0",       # Новый параметр
-                "uv": "AQIDAAoEAAMlugAAKSg6si5xAVAO" # Новый параметр
-            }
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             updated_count = 0
             errors = []
 
-            for i, phrase_obj in enumerate(phrases):
-                phrase_text = phrase_obj.phrase
-                logger.debug(f"[{i+1}/{len(phrases)}] Обрабатываем фразу: '{phrase_text}' для пользователя {chat_id}")
+            # --- ИЗМЕНЕНО: Используем сессию requests.Session для имитации браузера ---
+            with requests.Session() as session:
+                # Устанавливаем базовые заголовки для всей сессии, как у браузера
+                session.headers.update({
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Sec-Ch-Ua': '"Chromium";v="118", "Google Chrome";v="118", "Not=A?Brand";v="99"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Upgrade-Insecure-Requests': '1',
+                    # Referer будет устанавливаться для каждого запроса
+                    # User-Agent будет выбираться случайно для каждого запроса
+                })
 
-                if (i + 1) % 100 == 0:
-                    send_message(chat_id, f"Обработано {i+1} из {len(phrases)} фраз...")
+                for i, phrase_obj in enumerate(phrases):
+                    phrase_text = phrase_obj.phrase
+                    logger.debug(f"[{i+1}/{len(phrases)}] Обрабатываем фразу: '{phrase_text}' для пользователя {chat_id}")
 
-                params = params_template.copy()
-                params["query"] = phrase_text
+                    if (i + 1) % 100 == 0:
+                        send_message(chat_id, f"Обработано {i+1} из {len(phrases)} фраз...")
 
-                max_total_retries = 5
-                max_preset_retries = 3
-                total_retries = 0
-                preset_retries = 0
-                success = False
-                response_data = None
+                    # --- ИЗМЕНЕНО: Параметры запроса для имитации браузера ---
+                    params = {
+                        "ab_testing": "false",
+                        "appType": "1", # Веб-версия
+                        "curr": "rub",
+                        "dest": "-1257786", # Немного измененный dest
+                        "lang": "ru",
+                        "page": "1",
+                        "query": phrase_text, # Добавляем query прямо в params
+                        "resultset": "catalog",
+                        "sort": "popular",
+                        "spp": "20", # Изменено с 99 на 20
+                        "suppressSpellcheck": "false",
+                        "uclusters": "1", # Изменено с 0 на 1
+                    }
+                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-                while not success and (total_retries < max_total_retries or preset_retries < max_preset_retries):
+                    # --- ИЗМЕНЕНО: Улучшенная логика повторов с экспоненциальной задержкой и отдельной обработкой сетевых ошибок ---
+                    max_total_retries = 5
+                    max_preset_retries = 3
+                    max_network_retries = 5
+                    total_retries = 0
+                    preset_retries = 0
+                    network_retries = 0
+                    success = False
+                    response_data = None
+
+                    while not success and \
+                          (total_retries < max_total_retries or \
+                           preset_retries < max_preset_retries or \
+                           network_retries < max_network_retries):
+                        try:
+                            # --- ИЗМЕНЕНО: Реалистичная задержка и заголовки ---
+                            # Базовая задержка от 5 до 15 секунд, больше похоже на человека
+                            base_delay = random.uniform(5, 15)
+                            
+                            # Если была сетевая ошибка, увеличиваем задержку
+                            if network_retries > 0:
+                                # Задержка от 15 до 30 секунд при сетевых ошибках
+                                network_delay = random.uniform(15, 30)
+                                logger.info(f"Повторная попытка после сетевой ошибки ({network_retries}/{max_network_retries}) через {network_delay:.2f} секунд...")
+                                time.sleep(network_delay)
+                            else:
+                                logger.debug(f"Пауза {base_delay:.2f} секунд перед запросом для '{phrase_text}'...")
+                                time.sleep(base_delay)
+
+                            # Обновляем заголовки для каждого запроса
+                            headers = {
+                                'User-Agent': random.choice(POPULAR_USER_AGENTS),
+                                # Используем quote_plus для правильного кодирования URL
+                                'Referer': f'https://www.wildberries.ru/catalog/?search={quote_plus(phrase_text)}'
+                            }
+                            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+                            # --- ИЗМЕНЕНО: Используем сессию и обновленные параметры/заголовки ---
+                            response = session.get(
+                                base_url, 
+                                params=params,
+                                timeout=20, # Увеличен таймаут
+                                headers=headers
+                            )
+                            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                            
+                            response.raise_for_status()
+                            response_data = response.json()
+
+                            metadata = response_data.get("metadata", {})
+                            total = response_data.get("total", 0)
+                            preset = metadata.get("presetId", 0)
+
+                            logger.debug(f"Ответ для '{phrase_text}' пользователя {chat_id}: total={total}, preset={preset}")
+
+                            if total == 0 and total_retries < max_total_retries:
+                                total_retries += 1
+                                logger.info(f"Total=0 для '{phrase_text}' пользователя {chat_id}, повтор ({total_retries}/{max_total_retries})...")
+                                continue
+
+                            if preset == 0 and preset_retries < max_preset_retries:
+                                preset_retries += 1
+                                logger.info(f"Preset=0 для '{phrase_text}' пользователя {chat_id}, повтор ({preset_retries}/{max_preset_retries})...")
+                                continue
+
+                            success = True
+                            network_retries = 0 # Сбрасываем при успехе
+
+                        # --- ИЗМЕНЕНО: Улучшенная обработка сетевых ошибок ---
+                        except requests.exceptions.ProxyError as e:
+                            network_retries += 1
+                            logger.error(f"Сетевая ошибка (ProxyError) для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Сетевая ошибка (ProxyError) - {e}")
+                            if network_retries >= max_network_retries:
+                                 logger.error(f"Достигнуто максимальное количество сетевых повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
+                                 errors.append(f"Фраза '{phrase_text}': Прекращено из-за сетевых ошибок после {max_network_retries} попыток.")
+                                 break
+                                
+                        except requests.exceptions.ConnectionError as e:
+                            network_retries += 1
+                            logger.error(f"Ошибка подключения для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Ошибка подключения - {e}")
+                            if network_retries >= max_network_retries:
+                                 logger.error(f"Достигнуто максимальное количество сетевых повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
+                                 errors.append(f"Фраза '{phrase_text}': Прекращено из-за ошибок подключения после {max_network_retries} попыток.")
+                                 break
+                                
+                        except requests.exceptions.Timeout as e:
+                            network_retries += 1
+                            logger.error(f"Таймаут запроса для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Таймаут запроса - {e}")
+                            if network_retries >= max_network_retries:
+                                 logger.error(f"Достигнуто максимальное количество сетевых повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
+                                 errors.append(f"Фраза '{phrase_text}': Прекращено из-за таймаутов после {max_network_retries} попыток.")
+                                 break
+                                
+                        except requests.exceptions.RequestException as e:
+                            logger.error(f"Ошибка запроса для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Ошибка запроса - {e}")
+                            break # Прерываем попытки для других RequestException
+                            
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Ошибка парсинга JSON для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Ошибка парсинга JSON - {e}")
+                            break # Не повторяем при JSON ошибках
+                            
+                        except Exception as e:
+                            logger.error(f"Неожиданная ошибка для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Неожиданная ошибка - {e}")
+                            break # Не повторяем при прочих ошибках
+                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+                    if not success:
+                        logger.warning(f"Не удалось получить корректные данные для фразы '{phrase_text}' пользователя {chat_id} после повторов.")
+                        errors.append(f"Фраза '{phrase_text}': Не удалось получить данные после повторов.")
+                        continue
+
+                    # --- Остальная логика обработки ответа и обновления БД остается без изменений ---
                     try:
-                        # --- ИЗМЕНЕНО: Пауза от 3 до 10 секунд ---
-                        delay = random.uniform(3, 10)
-                        logger.debug(f"Пауза {delay:.2f} секунд перед запросом для '{phrase_text}'...")
-                        time.sleep(delay)
-                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-                        # --- ИЗМЕНЕНО: Добавлен случайный User-Agent ---
-                        headers = {
-                            'User-Agent': random.choice(POPULAR_USER_AGENTS)
-                        }
-                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-                        response = requests.get(base_url, params=params, timeout=15, headers=headers) # Добавлен headers
-                        response.raise_for_status()
-                        response_data = response.json()
+                        tpc = 0
+                        tpb = 0
+                        products = response_data.get("products", [])
+                        for product in products:
+                            log = product.get("log", {})
+                            tp = log.get("tp")
+                            if tp == "c":
+                                tpc += 1
+                            elif tp == "b":
+                                tpb += 1
 
                         metadata = response_data.get("metadata", {})
                         total = response_data.get("total", 0)
-                        preset = metadata.get("presetId", 0)
+                        norm_query = metadata.get("normquery")
+                        preset_id = metadata.get("presetId", 0)
 
-                        logger.debug(f"Ответ для '{phrase_text}' пользователя {chat_id}: total={total}, preset={preset}")
+                        logger.debug(f"Результаты для '{phrase_text}' пользователя {chat_id}: tpc={tpc}, tpb={tpb}, total={total}, normQuery='{norm_query}', preset={preset_id}")
 
-                        if total == 0 and total_retries < max_total_retries:
-                            total_retries += 1
-                            logger.info(f"Total=0 для '{phrase_text}' пользователя {chat_id}, повтор ({total_retries}/{max_total_retries})...")
-                            continue
+                        phrase_obj.auction = tpc
+                        phrase_obj.auto = tpb
+                        phrase_obj.total = total
+                        phrase_obj.normQuery = norm_query
+                        phrase_obj.preset = preset_id
 
-                        if preset == 0 and preset_retries < max_preset_retries:
-                            preset_retries += 1
-                            logger.info(f"Preset=0 для '{phrase_text}' пользователя {chat_id}, повтор ({preset_retries}/{max_preset_retries})...")
-                            continue
+                        db.session.commit()
+                        updated_count += 1
 
-                        success = True
+                        message = (
+                            f"✅ Обновлена фраза: {phrase_text}\n"
+                            f"   Auction (tp='c'): {tpc}\n"
+                            f"   Auto (tp='b'): {tpb}\n"
+                            f"   Total: {total}\n"
+                            f"   Norm Query: {norm_query}\n"
+                            f"   Preset: {preset_id}"
+                        )
+                        send_message(chat_id, message)
 
-                    except requests.exceptions.RequestException as e:
-                        logger.error(f"Ошибка запроса для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                        errors.append(f"Фраза '{phrase_text}': Ошибка запроса - {e}")
-                        break
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Ошибка парсинга JSON для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                        errors.append(f"Фраза '{phrase_text}': Ошибка парсинга JSON - {e}")
-                        break
                     except Exception as e:
-                        logger.error(f"Неожиданная ошибка для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                        errors.append(f"Фраза '{phrase_text}': Неожиданная ошибка - {e}")
-                        break
+                        logger.error(f"Ошибка обработки/обновления данных для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                        errors.append(f"Фраза '{phrase_text}': Ошибка обработки данных - {e}")
+                        db.session.rollback()
 
-                if not success:
-                    logger.warning(f"Не удалось получить корректные данные для фразы '{phrase_text}' пользователя {chat_id} после повторов.")
-                    errors.append(f"Фраза '{phrase_text}': Не удалось получить данные после повторов.")
-                    continue
-
-                try:
-                    tpc = 0
-                    tpb = 0
-                    products = response_data.get("products", [])
-                    for product in products:
-                        log = product.get("log", {})
-                        tp = log.get("tp")
-                        if tp == "c":
-                            tpc += 1
-                        elif tp == "b":
-                            tpb += 1
-
-                    metadata = response_data.get("metadata", {})
-                    total = response_data.get("total", 0)
-                    norm_query = metadata.get("normquery")
-                    preset_id = metadata.get("presetId", 0)
-
-                    logger.debug(f"Результаты для '{phrase_text}' пользователя {chat_id}: tpc={tpc}, tpb={tpb}, total={total}, normQuery='{norm_query}', preset={preset_id}")
-
-                    phrase_obj.auction = tpc
-                    phrase_obj.auto = tpb
-                    phrase_obj.total = total
-                    phrase_obj.normQuery = norm_query
-                    phrase_obj.preset = preset_id
-
-                    db.session.commit()
-                    updated_count += 1
-
-                    message = (
-                        f"✅ Обновлена фраза: {phrase_text}\n"
-                        f"   Auction (tp='c'): {tpc}\n"
-                        f"   Auto (tp='b'): {tpb}\n"
-                        f"   Total: {total}\n"
-                        f"   Norm Query: {norm_query}\n"
-                        f"   Preset: {preset_id}"
-                    )
-                    send_message(chat_id, message)
-
-                except Exception as e:
-                    logger.error(f"Ошибка обработки/обновления данных для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                    errors.append(f"Фраза '{phrase_text}': Ошибка обработки данных - {e}")
-                    db.session.rollback()
-
+            # --- Финальный отчет остается без изменений ---
             final_message_lines = [f"✅ Задача /searchads завершена для пользователя {chat_id}."]
             final_message_lines.append(f"   Обработано фраз: {len(phrases)}")
             final_message_lines.append(f"   Успешно обновлено: {updated_count}")
