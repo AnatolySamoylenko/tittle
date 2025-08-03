@@ -207,10 +207,12 @@ def extract_dates_from_filename_simple(filename):
     return None, None
 
 # --- ОБНОВЛЕННАЯ ФУНКЦИЯ: Построчная обработка XLSX с персональными таблицами ---
+# НАЧИНАЕТ обработку С САМОЙ ПЕРВОЙ СТРОКИ ДАННЫХ (без пропуска первых 2 строк)
 def process_phrases_from_xlsx(df, chat_id):
     """
     Обрабатывает DataFrame с данными фраз и сохраняет их в ПЕРСОНАЛЬНУЮ БД ПОСТРОЧНО.
     Использует колонки: 0 (Поисковый запрос), 3 (Запросов в среднем за день), 5 (Больше всего заказов в предмете).
+    НАЧИНАЕТ обработку С САМОЙ ПЕРВОЙ СТРОКИ ДАННЫХ (без пропуска первых 2 строк).
     """
     logger.info(f"Начинаем ПОСТРОЧНУЮ обработку DataFrame для пользователя {chat_id}. Форма: {df.shape}")
 
@@ -246,6 +248,9 @@ def process_phrases_from_xlsx(df, chat_id):
 
     with app.app_context():
         try:
+            # --- ИЗМЕНЕНО: Итерируемся по ВСЕМ строкам data_slice, начиная с индекса 0 ---
+            # В предыдущей версии было: for index, row in data_slice.iloc[2:, :].iterrows():
+            # Теперь: for index, row in data_slice.iterrows():
             for index, row in data_slice.iterrows():
                 processed_count += 1
                 try:
@@ -357,6 +362,7 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
                     return f"Ошибка: Не найден лист с данными. Доступны: {excel_file.sheet_names}"
 
                 xlsx_file.seek(0)
+                # Читаем с 4-й строки как заголовки (header=3)
                 df = pd.read_excel(xlsx_file, sheet_name=target_sheet, header=3)
 
             if df.empty:
@@ -392,6 +398,7 @@ def search_ads_task(chat_id):
                 send_message(chat_id, "В вашей персональной таблице phrases нет данных для обработки.")
                 return
 
+            # --- ИЗМЕНЕНО: Обновлен URL и параметры запроса ---
             base_url = "https://search.wb.ru/exactmatch/ru/common/v14/search"
             params_template = {
                 "ab_testing": "false",
@@ -399,12 +406,16 @@ def search_ads_task(chat_id):
                 "curr": "rub",
                 "dest": "-1257484",
                 "lang": "ru",
-                "page": "1",
+                "page": "1", # Изменено с 8 на 1
                 "resultset": "catalog",
                 "sort": "popular",
-                "spp": "30",
-                "suppressSpellcheck": "false"
+                "spp": "99", # Изменено с 30 на 99
+                "suppressSpellcheck": "false",
+                "uclusters": "0", # Новый параметр
+                "uiv": "0",       # Новый параметр
+                "uv": "AQIDAAoEAAMlugAAKSg6si5xAVAO" # Новый параметр
             }
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             updated_count = 0
             errors = []
