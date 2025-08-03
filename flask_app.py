@@ -61,24 +61,6 @@ def send_message(chat_id, text):
     }
     requests.post(url, json=payload)
 
-# Функция для проверки наличия записи в shops по chatId
-def check_shop_exists_for_chat(chat_id):
-    """Проверяет, есть ли запись в таблице shops для данного chat_id"""
-    try:
-        with app.app_context():
-            # Проверяем, существует ли таблица shops
-            inspector = inspect(db.engine)
-            if 'shops' not in inspector.get_table_names():
-                print("Таблица 'shops' не существует.")
-                return False
-            
-            # Проверяем наличие записи
-            shop_exists = db.session.query(Shop).filter_by(chatId=chat_id).first() is not None
-            return shop_exists
-    except Exception as e:
-        print(f"Ошибка при проверке наличия магазина: {e}")
-        return False
-
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     data = request.get_json()
@@ -90,12 +72,20 @@ def webhook():
         username = message.get("from", {}).get("username", "Неизвестный")
         
         if text == "/start":
-            # Проверяем наличие записи в shops для этого chat_id
-            shop_exists = check_shop_exists_for_chat(chat_id)
-            
-            # Проверяем, есть ли пользователь в базе
             with app.app_context():
+                # Проверяем, есть ли пользователь в базе
                 user = User.query.filter_by(chat_id=str(chat_id)).first()
+                
+                # Проверяем, есть ли запись в shops для этого chat_id
+                shop_exists = False
+                try:
+                    # Проверяем, существует ли таблица shops
+                    inspector = inspect(db.engine)
+                    if 'shops' in inspector.get_table_names():
+                        # Проверяем наличие записи
+                        shop_exists = Shop.query.filter_by(chatId=chat_id).first() is not None
+                except Exception as e:
+                    print(f"Ошибка при проверке наличия магазина: {e}")
                 
                 if user:
                     # Пользователь есть в базе
