@@ -1,6 +1,3 @@
-Хорошо, вот окончательный итоговый код `flask_app.py`, включающий все изменения и исправления:
-
-```python
 # flask_app.py
 import os
 import re
