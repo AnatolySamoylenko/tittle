@@ -167,12 +167,13 @@ def extract_dates_from_filename_simple(filename):
         return match.group(1), match.group(2)
     return None, None
 
+# --- ОБНОВЛЕННАЯ ФУНКЦИЯ: Построчная обработка XLSX ---
 def process_phrases_from_xlsx(df, chat_id):
     """
-    Обрабатывает DataFrame с данными фраз и сохраняет их в БД.
+    Обрабатывает DataFrame с данными фраз и сохраняет их в БД ПОСТРОЧНО.
     Использует колонки: 0 (Поисковый запрос), 3 (Запросов в среднем за день), 5 (Больше всего заказов в предмете).
     """
-    logger.info(f"Начинаем обработку DataFrame. Форма: {df.shape}, Колонки: {list(df.columns)[:10]}...")
+    logger.info(f"Начинаем ПОСТРОЧНУЮ обработку DataFrame. Форма: {df.shape}")
 
     required_indices = {'phrase_col_idx': 0, 'qnty_col_idx': 3, 'subject_col_idx': 5}
     max_required_idx = max(required_indices.values())
@@ -183,96 +184,113 @@ def process_phrases_from_xlsx(df, chat_id):
             f"Требуется как минимум {max_required_idx + 1} колонок. Найдено {len(df.columns)}."
         )
 
+    # Выбираем нужные колонки
     try:
         data_slice = df.iloc[:, [required_indices['phrase_col_idx'],
                                  required_indices['qnty_col_idx'],
                                  required_indices['subject_col_idx']]].copy()
         data_slice.columns = ['phrase_raw', 'qntyPerDay_raw', 'subject_raw']
-
-        data_slice['phrase'] = data_slice['phrase_raw'].astype(str).str.strip()
-        data_slice = data_slice[data_slice['phrase'] != '']
-        data_slice['qntyPerDay'] = pd.to_numeric(data_slice['qntyPerDay_raw'], errors='coerce').fillna(0).astype(int)
-        data_slice['subject'] = data_slice['subject_raw'].astype(str).str.strip()
-
-        final_data = data_slice.drop(columns=['phrase_raw', 'qntyPerDay_raw', 'subject_raw'])
-        logger.info(f"Данные после очистки: {final_data.shape[0]} строк.")
-
-        if final_data.empty:
-            raise ValueError("Нет данных для импорта после очистки.")
-
-        with app.app_context():
-            phrases_in_file = set(final_data['phrase'].tolist())
-            existing_phrases = set()
-            if phrases_in_file:
-                existing_records = db.session.query(Phrase.phrase).filter(
-                    Phrase.phrase.in_(list(phrases_in_file))
-                ).all()
-                existing_phrases = {row[0] for row in existing_records}
-                logger.debug(f"Найдено существующих фраз в БД: {len(existing_phrases)}")
-
-            phrases_to_add = []
-            new_phrases_info = []
-
-            for _, row in final_data.iterrows():
-                phrase_text = row['phrase']
-                is_new = phrase_text not in existing_phrases
-
-                # --- ИЗМЕНЕНО: Убраны значения по умолчанию, они будут установлены позже ---
-                phrase_obj = Phrase(
-                    phrase=phrase_text,
-                    qntyPerDay=row['qntyPerDay'],
-                    subject=row['subject']
-                    # preset, normQuery, auto, auction, total будут установлены позже
-                )
-                phrases_to_add.append(phrase_obj)
-
-                if is_new:
-                    new_phrases_info.append({
-                        'phrase': phrase_text,
-                        'qntyPerDay': row['qntyPerDay'],
-                        'subject': row['subject']
-                    })
-
-            if existing_phrases:
-                logger.debug(f"Удаление {len(existing_phrases)} существующих фраз...")
-                db.session.query(Phrase).filter(
-                    Phrase.phrase.in_(list(existing_phrases))
-                ).delete(synchronize_session=False)
-
-            if phrases_to_add:
-                logger.debug(f"Массовая вставка {len(phrases_to_add)} фраз...")
-                db.session.bulk_save_objects(phrases_to_add, update_changed_only=False)
-
-            db.session.commit()
-            logger.info("Данные успешно сохранены в БД.")
-
-            phrases_added = len(new_phrases_info)
-            phrases_updated = len(existing_phrases)
-
-            if new_phrases_info:
-                logger.debug(f"Отправляем информацию о {len(new_phrases_info)} новых фразах...")
-                info_to_send = new_phrases_info[:50]
-                for i in range(0, len(info_to_send), 10):
-                    batch = info_to_send[i:i+10]
-                    message_lines = [f"Найдены новые фразы ({len(new_phrases_info)} всего, показаны первые {len(info_to_send)}):"]
-                    for info in batch:
-                        message_lines.append(
-                            f"Фраза: {info['phrase']}\n"
-                            f"Запросов/день: {info['qntyPerDay']}\n"
-                            f"Предмет: {info['subject']}\n"
-                            f"---"
-                        )
-                    send_message(chat_id, "\n".join(message_lines))
-
-                if len(new_phrases_info) > 50:
-                     send_message(chat_id, f"... и еще {len(new_phrases_info) - 50} фраз.")
-
-            return phrases_added, phrases_updated, len(final_data)
-
     except Exception as e:
-        logger.error(f"Ошибка при обработке данных DataFrame: {e}")
-        db.session.rollback()
-        raise
+        logger.error(f"Ошибка при выборе колонок: {e}")
+        raise ValueError(f"Ошибка при выборе колонок: {e}")
+
+    total_rows = len(data_slice)
+    logger.info(f"Будет обработано {total_rows} строк.")
+
+    if total_rows == 0:
+        return 0, 0, 0 # phrases_added, phrases_updated, total_processed
+
+    phrases_added = 0
+    phrases_updated = 0
+    processed_count = 0
+
+    with app.app_context():
+        try:
+            # Итерируемся по строкам DataFrame
+            for index, row in data_slice.iterrows():
+                processed_count += 1
+                # --- Обработка одной строки ---
+                try:
+                    # 1. Очистка данных для текущей строки
+                    phrase_raw = row['phrase_raw']
+                    phrase = str(phrase_raw).strip() if pd.notna(phrase_raw) else ""
+                    
+                    if not phrase:
+                        logger.debug(f"[{processed_count}/{total_rows}] Пропущена пустая фраза в строке {index}")
+                        continue
+
+                    qntyPerDay_raw = row['qntyPerDay_raw']
+                    qntyPerDay = int(float(qntyPerDay_raw)) if pd.notna(qntyPerDay_raw) else 0
+                    
+                    subject_raw = row['subject_raw']
+                    subject = str(subject_raw).strip() if pd.notna(subject_raw) else ""
+
+                    # 2. Проверка существования фразы в БД
+                    existing_phrase = db.session.get(Phrase, phrase)
+                    is_new = existing_phrase is None
+
+                    # 3. Создание или обновление объекта
+                    if is_new:
+                        # Создаем новую фразу
+                        phrase_obj = Phrase(
+                            phrase=phrase,
+                            qntyPerDay=qntyPerDay,
+                            subject=subject
+                            # preset, normQuery, auto, auction, total будут установлены позже (по умолчанию 0/None)
+                        )
+                        db.session.add(phrase_obj)
+                        phrases_added += 1
+                        logger.debug(f"[{processed_count}/{total_rows}] Добавлена новая фраза: '{phrase}'")
+                    else:
+                        # Удаляем существующую и добавляем обновленную
+                        db.session.delete(existing_phrase)
+                        new_phrase_obj = Phrase(
+                            phrase=phrase,
+                            qntyPerDay=qntyPerDay,
+                            subject=subject
+                        )
+                        db.session.add(new_phrase_obj)
+                        phrases_updated += 1
+                        logger.debug(f"[{processed_count}/{total_rows}] Обновлена фраза: '{phrase}'")
+
+                    # 4. Коммитим изменения для каждой строки
+                    # Это позволяет избежать накопления большого количества изменений в сессии
+                    db.session.commit()
+                    
+                    # 5. Отправка уведомления о новой фразе (только для новых)
+                    if is_new:
+                         message_text = f"Новая фраза:\nФраза: {phrase}\nЗапросов в день: {qntyPerDay}\nПредмет: {subject}"
+                         send_message(chat_id, message_text)
+
+                except (ValueError, TypeError) as row_e:
+                    logger.error(f"[{processed_count}/{total_rows}] Ошибка обработки строки {index}: {row_e}")
+                    db.session.rollback() # Откатываем транзакцию для этой строки
+                    # Продолжаем обработку следующей строки
+                    continue
+                except Exception as row_e:
+                    logger.error(f"[{processed_count}/{total_rows}] Неожиданная ошибка в строке {index}: {row_e}")
+                    db.session.rollback()
+                    continue
+
+                # --- Отправка промежуточного отчета ---
+                if processed_count % 100 == 0 or processed_count == total_rows:
+                     progress_msg = f"Обработано {processed_count} из {total_rows} строк. Добавлено: {phrases_added}, Обновлено: {phrases_updated}"
+                     logger.info(progress_msg)
+                     # Отправляем сообщение каждые 1000 строк или в конце
+                     if processed_count % 1000 == 0 or processed_count == total_rows:
+                         send_message(chat_id, progress_msg)
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка в процессе обработки: {e}")
+            db.session.rollback()
+            # Даже при критической ошибке, часть данных могла быть сохранена
+            final_msg = f"Задача прервана. Обработано {processed_count} строк. Добавлено: {phrases_added}, Обновлено: {phrases_updated}. Ошибка: {e}"
+            send_message(chat_id, final_msg)
+            # Перебрасываем исключение, чтобы оно отобразилось в основном обработчике
+            raise 
+
+    logger.info(f"Построчная обработка завершена. Всего: {total_rows}, Добавлено: {phrases_added}, Обновлено: {phrases_updated}")
+    return phrases_added, phrases_updated, processed_count
 
 
 def process_zip_and_xlsx(zip_content, original_filename, chat_id):
@@ -499,8 +517,9 @@ def webhook():
     """Обработчик вебхука Telegram."""
     initialize_database_if_needed()
 
+    # ИСПРАВЛЕНО: Полное условие проверки JSON-данных
     json_data = request.get_json()
-    if not json_data:
+    if not json_
         logger.warning("Получен не JSON запрос или пустое тело")
         return "OK"
 
