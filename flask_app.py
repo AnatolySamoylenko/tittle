@@ -83,7 +83,6 @@ def _check_tables_exist():
         return False
 
 # --- ИСПРАВЛЕНА Инициализация БД ---
-# Убран @app.before_first_request, используем ленивую инициализацию
 def initialize_database_if_needed():
     """Ленивая инициализация БД при первом обращении."""
     if not _check_tables_exist():
@@ -120,7 +119,7 @@ def extract_dates_from_filename_simple(filename):
         return match.group(1), match.group(2)
     return None, None
 
-# --- Оптимизированная логика обработки файлов ---
+# --- ИСПРАВЛЕНА Оптимизированная логика обработки файлов ---
 def process_phrases_from_xlsx(df, chat_id):
     """
     Обрабатывает DataFrame с данными фраз и сохраняет их в БД.
@@ -156,18 +155,20 @@ def process_phrases_from_xlsx(df, chat_id):
             raise ValueError("Нет данных для импорта после очистки.")
 
         with app.app_context():
-            # Проверка существующих фраз
+            # --- ИСПРАВЛЕНО: Используем ORM-запросы вместо сырого SQL с text() ---
+            # 1. Проверка существующих фраз
             phrases_in_file = set(final_data['phrase'].tolist())
             existing_phrases = set()
-            if phrases_in_file:
-                existing_records = db.session.execute(
-                    text("SELECT phrase FROM phrases WHERE phrase IN :phrases"),
-                    {"phrases": tuple(phrases_in_file)}
-                ).fetchall()
+            if phrases_in_file: # Проверяем, что множество не пустое
+                # SQLAlchemy ORM корректно обрабатывает список в in_()
+                # Используем list(), так как in_() лучше работает со списками
+                existing_records = db.session.query(Phrase.phrase).filter(
+                    Phrase.phrase.in_(list(phrases_in_file))
+                ).all()
                 existing_phrases = {row[0] for row in existing_records}
                 logger.debug(f"Найдено существующих фраз в БД: {len(existing_phrases)}")
 
-            # Подготовка данных
+            # 2. Подготовка данных
             phrases_to_add = []
             new_phrases_info = []
 
@@ -179,6 +180,7 @@ def process_phrases_from_xlsx(df, chat_id):
                     phrase=phrase_text,
                     qntyPerDay=row['qntyPerDay'],
                     subject=row['subject']
+                    # Поля preset, normQuery, auto, auction, total получат значения по умолчанию
                 )
                 phrases_to_add.append(phrase_obj)
 
@@ -189,23 +191,26 @@ def process_phrases_from_xlsx(df, chat_id):
                         'subject': row['subject']
                     })
 
-            # Массовое удаление и вставка
+            # 3. Массовое удаление существующих фраз (если они есть)
+            # --- ИСПРАВЛЕНО: Используем ORM-запрос для удаления ---
             if existing_phrases:
                 logger.debug(f"Удаление {len(existing_phrases)} существующих фраз...")
-                db.session.execute(
-                    text("DELETE FROM phrases WHERE phrase IN :phrases"),
-                    {"phrases": tuple(existing_phrases)}
-                )
+                # Используем ORM-запрос для удаления
+                db.session.query(Phrase).filter(
+                    Phrase.phrase.in_(list(existing_phrases))
+                ).delete(synchronize_session=False)
 
+            # 4. Массовая вставка всех фраз (новых и обновленных)
             if phrases_to_add:
                 logger.debug(f"Массовая вставка {len(phrases_to_add)} фраз...")
                 db.session.bulk_save_objects(phrases_to_add, update_changed_only=False)
 
+            # 5. Один коммит для всех изменений
             db.session.commit()
             logger.info("Данные успешно сохранены в БД.")
 
             phrases_added = len(new_phrases_info)
-            phrases_updated = len(existing_phrases)
+            phrases_updated = len(existing_phrases) # Те, что были удалены и вставлены заново
 
             # Отправка информации о новых фразах
             if new_phrases_info:
@@ -417,7 +422,6 @@ def index():
         return f"<h1>Ошибка</h1><p>{str(e)}</p>", 500
 
 # --- Инициализация ---
-# Убран @app.before_first_request
 # Инициализация будет происходить лениво при первом запросе к / или webhook
 
 if __name__ == "__main__":
