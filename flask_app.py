@@ -1,3 +1,6 @@
+Хорошо, вот окончательный итоговый код `flask_app.py`, включающий все изменения и исправления:
+
+```python
 # flask_app.py
 import os
 import re
@@ -439,9 +442,11 @@ def search_ads_task(chat_id):
 
                 while not success and (total_retries < max_total_retries or preset_retries < max_preset_retries):
                     try:
-                        delay = random.uniform(3, 7)
+                        # --- ИЗМЕНЕНО: Пауза от 3 до 10 секунд ---
+                        delay = random.uniform(3, 10)
                         logger.debug(f"Пауза {delay:.2f} секунд перед запросом для '{phrase_text}'...")
                         time.sleep(delay)
+                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
                         # --- ИЗМЕНЕНО: Добавлен случайный User-Agent ---
                         headers = {
