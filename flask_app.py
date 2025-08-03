@@ -10,7 +10,8 @@ import requests
 import pandas as pd
 from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, MetaData, Table
+from sqlalchemy.exc import OperationalError
 
 # --- Настройка логирования ---
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +32,7 @@ _tables_exist_cache = {}
 _user_shop_cache = {}
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-if not TELEGRAM_TOKEN:
+if not TEGRAM_TOKEN:
     logger.warning("Переменная окружения TELEGRAM_TOKEN не установлена!")
 
 # --- Модели БД ---
@@ -60,6 +61,52 @@ class Phrase(db.Model):
     total = db.Column(db.Integer, nullable=False, default=0)
 
 # --- Вспомогательные функции ---
+def _check_and_update_phrases_table():
+    """Проверяет структуру таблицы phrases и обновляет её при необходимости."""
+    with app.app_context():
+        try:
+            inspector = inspect(db.engine)
+            if 'phrases' not in inspector.get_table_names():
+                logger.info("Таблица 'phrases' не найдена. Будет создана при инициализации БД.")
+                return False # Таблица отсутствует
+
+            # Получаем информацию о существующих колонках
+            existing_columns = {col['name'] for col in inspector.get_columns('phrases')}
+            logger.debug(f"Существующие колонки в 'phrases': {existing_columns}")
+            
+            # Получаем ожидаемые колонки из модели
+            # Создаем временную таблицу на основе модели, чтобы получить её структуру
+            temp_metadata = MetaData()
+            temp_table = Phrase.__table__.to_metadata(temp_metadata)
+            expected_columns = {col.name for col in temp_table.columns}
+            logger.debug(f"Ожидаемые колонки в 'phrases': {expected_columns}")
+            
+            # Проверяем, совпадают ли множества колонок
+            if existing_columns == expected_columns:
+                logger.info("Структура таблицы 'phrases' соответствует модели.")
+                return True # Структура совпадает
+            else:
+                logger.warning(f"Несовпадение структуры таблицы 'phrases'. "
+                               f"Существующие: {existing_columns}. Ожидаемые: {expected_columns}. "
+                               f"Таблица будет пересоздана.")
+                # Удаляем таблицу
+                db.session.execute(text("DROP TABLE phrases"))
+                db.session.commit()
+                _tables_exist_cache.clear() # Сбрасываем кэш
+                return False # Таблица была удалена
+                
+        except Exception as e:
+            logger.error(f"Ошибка при проверке/обновлении таблицы 'phrases': {e}")
+            # В случае ошибки проверки, лучше пересоздать таблицу
+            try:
+                db.session.execute(text("DROP TABLE IF EXISTS phrases"))
+                db.session.commit()
+                _tables_exist_cache.clear()
+                logger.info("Таблица 'phrases' будет пересоздана из-за ошибки проверки.")
+            except Exception as drop_e:
+                logger.error(f"Ошибка при принудительном удалении таблицы 'phrases': {drop_e}")
+            return False
+
 def _check_tables_exist():
     """Проверяет существование таблиц, используя кэш."""
     global _tables_exist_cache
@@ -67,33 +114,37 @@ def _check_tables_exist():
     if cache_key in _tables_exist_cache:
         return _tables_exist_cache[cache_key]
 
-    # Простая проверка без контекста, так как db.engine доступен
     try:
         inspector = inspect(db.engine)
         existing_tables = set(inspector.get_table_names())
-        required_tables = {'users', 'shops', 'phrases'}
-        result = required_tables.issubset(existing_tables)
+        required_tables = {'users', 'shops'}
+        # Для phrases делаем отдельную проверку с возможным обновлением
+        phrases_ok = _check_and_update_phrases_table()
+        
+        result = required_tables.issubset(existing_tables) and phrases_ok
         _tables_exist_cache[cache_key] = result
         if not result:
             missing = required_tables - existing_tables
-            logger.info(f"Отсутствующие таблицы: {missing}")
+            if missing:
+                logger.info(f"Отсутствующие таблицы: {missing}")
+            if not phrases_ok:
+                logger.info("Таблица 'phrases' требует пересоздания или создания.")
         return result
     except Exception as e:
         logger.error(f"Ошибка при проверке таблиц: {e}")
         return False
 
-# --- ИСПРАВЛЕНА Инициализация БД ---
 def initialize_database_if_needed():
     """Ленивая инициализация БД при первом обращении."""
     if not _check_tables_exist():
-        logger.info("Таблицы отсутствуют, инициализируем БД...")
+        logger.info("Таблицы отсутствуют или имеют неактуальную структуру, инициализируем БД...")
         with app.app_context():
             try:
                 db.create_all()
                 _tables_exist_cache.clear()
-                logger.info("Таблицы успешно созданы.")
+                logger.info("Таблицы успешно созданы или обновлены.")
             except Exception as e:
-                logger.error(f"Ошибка при создании таблиц: {e}")
+                logger.error(f"Ошибка при создании/обновлении таблиц: {e}")
                 raise
 
 def send_message(chat_id, text):
@@ -119,7 +170,6 @@ def extract_dates_from_filename_simple(filename):
         return match.group(1), match.group(2)
     return None, None
 
-# --- ИСПРАВЛЕНА Оптимизированная логика обработки файлов ---
 def process_phrases_from_xlsx(df, chat_id):
     """
     Обрабатывает DataFrame с данными фраз и сохраняет их в БД.
@@ -155,20 +205,16 @@ def process_phrases_from_xlsx(df, chat_id):
             raise ValueError("Нет данных для импорта после очистки.")
 
         with app.app_context():
-            # --- ИСПРАВЛЕНО: Используем ORM-запросы вместо сырого SQL с text() ---
-            # 1. Проверка существующих фраз
+            # Используем ORM-запросы для проверки и удаления
             phrases_in_file = set(final_data['phrase'].tolist())
             existing_phrases = set()
-            if phrases_in_file: # Проверяем, что множество не пустое
-                # SQLAlchemy ORM корректно обрабатывает список в in_()
-                # Используем list(), так как in_() лучше работает со списками
+            if phrases_in_file:
                 existing_records = db.session.query(Phrase.phrase).filter(
                     Phrase.phrase.in_(list(phrases_in_file))
                 ).all()
                 existing_phrases = {row[0] for row in existing_records}
                 logger.debug(f"Найдено существующих фраз в БД: {len(existing_phrases)}")
 
-            # 2. Подготовка данных
             phrases_to_add = []
             new_phrases_info = []
 
@@ -180,7 +226,6 @@ def process_phrases_from_xlsx(df, chat_id):
                     phrase=phrase_text,
                     qntyPerDay=row['qntyPerDay'],
                     subject=row['subject']
-                    # Поля preset, normQuery, auto, auction, total получат значения по умолчанию
                 )
                 phrases_to_add.append(phrase_obj)
 
@@ -191,26 +236,23 @@ def process_phrases_from_xlsx(df, chat_id):
                         'subject': row['subject']
                     })
 
-            # 3. Массовое удаление существующих фраз (если они есть)
-            # --- ИСПРАВЛЕНО: Используем ORM-запрос для удаления ---
+            # Массовое удаление существующих фраз
             if existing_phrases:
                 logger.debug(f"Удаление {len(existing_phrases)} существующих фраз...")
-                # Используем ORM-запрос для удаления
                 db.session.query(Phrase).filter(
                     Phrase.phrase.in_(list(existing_phrases))
                 ).delete(synchronize_session=False)
 
-            # 4. Массовая вставка всех фраз (новых и обновленных)
+            # Массовая вставка всех фраз
             if phrases_to_add:
                 logger.debug(f"Массовая вставка {len(phrases_to_add)} фраз...")
                 db.session.bulk_save_objects(phrases_to_add, update_changed_only=False)
 
-            # 5. Один коммит для всех изменений
             db.session.commit()
             logger.info("Данные успешно сохранены в БД.")
 
             phrases_added = len(new_phrases_info)
-            phrases_updated = len(existing_phrases) # Те, что были удалены и вставлены заново
+            phrases_updated = len(existing_phrases)
 
             # Отправка информации о новых фразах
             if new_phrases_info:
@@ -289,11 +331,10 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     """Обработчик вебхука Telegram."""
-    # --- Добавлен вызов инициализации ---
     initialize_database_if_needed()
     
     json_data = request.get_json()
-    if not json_data:
+    if not json_
         logger.warning("Получен не JSON запрос или пустое тело")
         return "OK"
 
@@ -389,7 +430,6 @@ def webhook():
 @app.route("/")
 def index():
     """Главная страница с информацией."""
-    # --- Добавлен вызов инициализации ---
     initialize_database_if_needed()
     
     try:
