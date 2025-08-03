@@ -3,25 +3,41 @@ import os
 import re
 import zipfile
 import traceback
+import logging
 from io import BytesIO
+from collections import defaultdict # Для кэширования
 
 import requests
 import pandas as pd
 from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
+
+# --- Настройка логирования ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # --- Конфигурация ---
-# Убедитесь, что путь корректный и доступен для записи
-# Используем путь, совместимый с PythonAnywhere
 DB_PATH = '/home/AnatolySamoylenko/tittle_database.db'
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_PATH}'
+# Отключаем track modifications для экономии ресурсов
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Устанавливаем логгер для SQLAlchemy
+app.config['SQLALCHEMY_ECHO'] = False # Можно включить для отладки SQL
+
 db = SQLAlchemy(app)
 
+# --- Кэширование для избежания повторных запросов к БД ---
+# Храним информацию о существовании таблиц и пользователей/магазинах в памяти
+# Это допустимо для небольших приложений, но может потребовать сброса при изменении БД
+_tables_exist_cache = {}
+_user_shop_cache = {} # Кэш для user/shop existence check
+
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+if not TELEGRAM_TOKEN:
+    logger.warning("Переменная окружения TELEGRAM_TOKEN не установлена!")
 
 # --- Модели БД ---
 class User(db.Model):
@@ -36,39 +52,60 @@ class Shop(db.Model):
     API = db.Column(db.Text, nullable=False)
     chatId = db.Column(db.Integer, nullable=False)
 
-# Модель фраз без id и дат
 class Phrase(db.Model):
     __tablename__ = 'phrases'
-    # phrase является первичным ключом, обеспечивая уникальность
     phrase = db.Column(db.Text, primary_key=True, nullable=False)
     qntyPerDay = db.Column(db.Integer, nullable=False)
     subject = db.Column(db.Text, nullable=False)
+    # Новые поля
+    preset = db.Column(db.Integer, nullable=False, default=0)
+    normQuery = db.Column(db.Text, nullable=True, default=None)
+    auto = db.Column(db.Integer, nullable=False, default=0)
+    auction = db.Column(db.Integer, nullable=False, default=0)
+    total = db.Column(db.Integer, nullable=False, default=0)
 
 # --- Вспомогательные функции ---
+def _check_tables_exist():
+    """Проверяет существование таблиц, используя кэш."""
+    global _tables_exist_cache
+    cache_key = "tables_exist"
+    if cache_key in _tables_exist_cache:
+        return _tables_exist_cache[cache_key]
+
+    with app.app_context():
+        try:
+            inspector = inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+            required_tables = {'users', 'shops', 'phrases'}
+            result = required_tables.issubset(existing_tables)
+            _tables_exist_cache[cache_key] = result
+            if not result:
+                missing = required_tables - existing_tables
+                logger.info(f"Отсутствующие таблицы: {missing}")
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка при проверке таблиц: {e}")
+            return False
+
 def initialize_database():
     """Создает таблицы БД при запуске, если они не существуют."""
+    global _tables_exist_cache
+    if _check_tables_exist():
+        logger.info("Все таблицы уже существуют.")
+        return
+
     with app.app_context():
-        inspector = inspect(db.engine)
-        existing_tables = set(inspector.get_table_names())
-
-        required_tables = {'users', 'shops', 'phrases'}
-        tables_to_create = required_tables - existing_tables
-
-        if tables_to_create:
-            print(f"Создаем таблицы: {', '.join(tables_to_create)}")
-            try:
-                # Создаем только недостающие таблицы
-                db.create_all()
-                print("Таблицы успешно созданы.")
-            except Exception as e:
-                print(f"Ошибка при создании таблиц: {e}")
-        else:
-            print("Все таблицы уже существуют.")
+        try:
+            db.create_all()
+            _tables_exist_cache.clear() # Сброс кэша после создания
+            logger.info("Таблицы успешно созданы.")
+        except Exception as e:
+            logger.error(f"Ошибка при создании таблиц: {e}")
 
 def send_message(chat_id, text):
     """Отправляет текстовое сообщение в Telegram."""
     if not TELEGRAM_TOKEN:
-        print("TELEGRAM_TOKEN не установлен!")
+        logger.error("TELEGRAM_TOKEN не установлен!")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -76,142 +113,126 @@ def send_message(chat_id, text):
     try:
         response = requests.post(url, json=payload, timeout=15)
         response.raise_for_status()
-        app.logger.info(f"Сообщение отправлено пользователю {chat_id}")
+        logger.debug(f"Сообщение отправлено пользователю {chat_id}")
     except requests.exceptions.RequestException as e:
-        app.logger.error(f"Ошибка отправки сообщения пользователю {chat_id}: {e}")
+        logger.error(f"Ошибка отправки сообщения пользователю {chat_id}: {e}")
 
 def extract_dates_from_filename_simple(filename):
-    """Простое извлечение дат для логирования. Не используется в БД."""
+    """Простое извлечение дат для логирования."""
     pattern = r'[сcCc][\s_\-\.]*([\d\-\./]+)[\s_\-\.]*[пnN][оoO][\s_\-\.]*([\d\-\./]+)'
     match = re.search(pattern, filename)
     if match:
         return match.group(1), match.group(2)
     return None, None
 
-# --- ИСПРАВЛЕННАЯ Основная логика обработки файлов ---
+# --- Оптимизированная логика обработки файлов ---
 def process_phrases_from_xlsx(df, chat_id):
     """
     Обрабатывает DataFrame с данными фраз и сохраняет их в БД.
     Использует колонки: 0 (Поисковый запрос), 3 (Запросов в среднем за день), 5 (Больше всего заказов в предмете).
-    Отправляет новые фразы в Telegram.
     """
-    print(f"Начинаем обработку DataFrame. Колонки: {list(df.columns)}")
-    print(f"Форма DataFrame: {df.shape}")
+    logger.info(f"Начинаем обработку DataFrame. Форма: {df.shape}, Колонки: {list(df.columns)[:10]}...") # Логируем только первые 10
 
-    # ЯВНО указываем индексы нужных колонок (0-based)
-    # 1 колонка = индекс 0 = 'Поисковый запрос'
-    # 4 колонка = индекс 3 = 'Запросов в среднем за день'
-    # 6 колонка = индекс 5 = 'Больше всего заказов в предмете'
-    required_indices = {
-        'phrase_col_idx': 0,
-        'qnty_col_idx': 3,
-        'subject_col_idx': 5
-    }
-
-    # Проверка наличия необходимых колонок по индексу
+    required_indices = {'phrase_col_idx': 0, 'qnty_col_idx': 3, 'subject_col_idx': 5}
     max_required_idx = max(required_indices.values())
+
     if max_required_idx >= len(df.columns):
-        error_msg = (
+        raise ValueError(
             f"Файл не содержит достаточно колонок. "
-            f"Требуется как минимум {max_required_idx + 1} колонок (индексы 0 до {max_required_idx}). "
-            f"Найдено {len(df.columns)} колонок."
+            f"Требуется как минимум {max_required_idx + 1} колонок. Найдено {len(df.columns)}."
         )
-        raise ValueError(error_msg)
 
-    # Проверка, что колонки не пустые (по названию или содержимому)
-    print(f"Используемые индексы: {required_indices}")
-    print(f"Названия используемых колонок: "
-          f"0:'{df.columns[0] if len(df.columns) > 0 else 'N/A'}', "
-          f"3:'{df.columns[3] if len(df.columns) > 3 else 'N/A'}', "
-          f"5:'{df.columns[5] if len(df.columns) > 5 else 'N/A'}'")
+    # Векторизованная обработка данных с помощью pandas
+    try:
+        # Выбор и переименование колонок
+        data_slice = df.iloc[:, [required_indices['phrase_col_idx'],
+                                 required_indices['qnty_col_idx'],
+                                 required_indices['subject_col_idx']]].copy()
+        data_slice.columns = ['phrase_raw', 'qntyPerDay_raw', 'subject_raw']
 
-    # Выбор нужных колонок по индексу
-    data_slice = df.iloc[:, [required_indices['phrase_col_idx'], 
-                             required_indices['qnty_col_idx'], 
-                             required_indices['subject_col_idx']]].copy()
-    
-    # Присваиваем осмысленные имена колонкам для дальнейшей обработки
-    data_slice.columns = ['phrase_raw', 'qntyPerDay_raw', 'subject_raw']
+        # Очистка данных
+        data_slice['phrase'] = data_slice['phrase_raw'].astype(str).str.strip()
+        data_slice = data_slice[data_slice['phrase'] != '']
+        data_slice['qntyPerDay'] = pd.to_numeric(data_slice['qntyPerDay_raw'], errors='coerce').fillna(0).astype(int)
+        data_slice['subject'] = data_slice['subject_raw'].astype(str).str.strip()
 
-    print(f"Форма data_slice до очистки: {data_slice.shape}")
-    if not data_slice.empty:
-         print(f"Примеры данных до очистки (первые 2 строки):\n{data_slice.head(2)}")
+        # Удаление промежуточных колонок
+        final_data = data_slice.drop(columns=['phrase_raw', 'qntyPerDay_raw', 'subject_raw'])
+        logger.info(f"Данные после очистки: {final_data.shape[0]} строк.")
 
-    # Очистка и преобразование данных
-    # 1. Phrase
-    data_slice['phrase'] = data_slice['phrase_raw'].astype(str).str.strip()
-    initial_count = len(data_slice)
-    data_slice = data_slice[data_slice['phrase'] != '']
-    after_phrase_filter = len(data_slice)
-    print(f"Строк после фильтрации пустых phrase: {after_phrase_filter} (удалено {initial_count - after_phrase_filter})")
+        if final_data.empty:
+            raise ValueError("Нет данных для импорта после очистки.")
 
-    # 2. QntyPerDay - используем 'Запросов в среднем за день' (колонка 3)
-    # Преобразуем в число, заменяем ошибки на 0, затем в int
-    data_slice['qntyPerDay'] = pd.to_numeric(data_slice['qntyPerDay_raw'], errors='coerce').fillna(0).astype(int)
-    
-    # 3. Subject
-    data_slice['subject'] = data_slice['subject_raw'].astype(str).str.strip()
+        # --- Оптимизированная работа с БД ---
+        with app.app_context():
+            # 1. Получаем список всех фраз из DataFrame
+            phrases_in_file = set(final_data['phrase'].tolist())
+            logger.debug(f"Уникальных фраз в файле: {len(phrases_in_file)}")
 
-    # Удаление промежуточных колонок
-    final_data = data_slice.drop(columns=['phrase_raw', 'qntyPerDay_raw', 'subject_raw'])
+            # 2. Проверяем, какие из них уже существуют в БД
+            # Используем один запрос для проверки множества фраз
+            existing_phrases = set()
+            if phrases_in_file: # Проверяем, что множество не пустое
+                 # SQLAlchemy требует явного указания типа для сравнения с множеством
+                 existing_records = db.session.execute(
+                     text("SELECT phrase FROM phrases WHERE phrase IN :phrases"),
+                     {"phrases": tuple(phrases_in_file)}
+                 ).fetchall()
+                 existing_phrases = {row[0] for row in existing_records}
+                 logger.debug(f"Найдено существующих фраз в БД: {len(existing_phrases)}")
 
-    print(f"Форма final_data после очистки: {final_data.shape}")
-    if not final_data.empty:
-        print(f"Примеры данных после очистки (первые 2 строки):\n{final_data.head(2)}")
+            # 3. Подготавливаем данные для массовой вставки/обновления
+            phrases_to_add = []
+            new_phrases_info = []
 
-    if final_data.empty:
-        raise ValueError("Нет данных для импорта после очистки.")
-
-    phrases_added = 0
-    phrases_updated = 0
-    new_phrases_info = []
-
-    with app.app_context():
-        try:
-            phrases_to_merge = []
-            processed_count = 0
             for _, row in final_data.iterrows():
-                processed_count += 1
                 phrase_text = row['phrase']
+                is_new = phrase_text not in existing_phrases
 
-                # Проверяем существование фразы
-                existing_phrase = db.session.get(Phrase, phrase_text)
+                # Создаем объект Phrase
+                phrase_obj = Phrase(
+                    phrase=phrase_text,
+                    qntyPerDay=row['qntyPerDay'],
+                    subject=row['subject']
+                    # Поля preset, normQuery, auto, auction, total получат значения по умолчанию
+                )
+                phrases_to_add.append(phrase_obj)
 
-                if existing_phrase:
-                    phrases_updated += 1
-                    print(f"[{processed_count}] Обновляем существующую фразу: {phrase_text}")
-                else:
-                    phrases_added += 1
+                if is_new:
                     new_phrases_info.append({
                         'phrase': phrase_text,
                         'qntyPerDay': row['qntyPerDay'],
                         'subject': row['subject']
                     })
-                    print(f"[{processed_count}] Найдена новая фраза: {phrase_text}")
 
-                # Создаем объект для merge
-                phrase_obj = Phrase(
-                    phrase=phrase_text,
-                    qntyPerDay=row['qntyPerDay'],
-                    subject=row['subject']
+            # 4. Массовое удаление существующих фраз (если они есть)
+            if existing_phrases:
+                logger.debug(f"Удаление {len(existing_phrases)} существующих фраз...")
+                # bulk_delete требует модели, но проще использовать execute для простого удаления
+                db.session.execute(
+                    text("DELETE FROM phrases WHERE phrase IN :phrases"),
+                    {"phrases": tuple(existing_phrases)}
                 )
-                phrases_to_merge.append(phrase_obj)
 
-            # Массовое обновление/вставка
-            print(f"Выполняем merge для {len(phrases_to_merge)} записей...")
-            for obj in phrases_to_merge:
-                db.session.merge(obj)
+            # 5. Массовая вставка всех фраз (новых и обновленных)
+            if phrases_to_add:
+                logger.debug(f"Массовая вставка {len(phrases_to_add)} фраз...")
+                db.session.bulk_save_objects(phrases_to_add, update_changed_only=False)
+
+            # 6. Один коммит для всех изменений
             db.session.commit()
-            print("Данные успешно сохранены в БД.")
+            logger.info("Данные успешно сохранены в БД.")
 
-            # Отправка информации о новых фразах (пакетами)
+            # --- Отправка информации о новых фразах ---
+            phrases_added = len(new_phrases_info)
+            phrases_updated = len(existing_phrases) # Те, что были удалены и вставлены заново
+
             if new_phrases_info:
-                print(f"Отправляем информацию о {len(new_phrases_info)} новых фразах...")
-                # Отправляем первые 50 новых фраз, чтобы не перегружать Telegram
-                info_to_send = new_phrases_info[:50] 
+                logger.debug(f"Отправляем информацию о {len(new_phrases_info)} новых фразах...")
+                # Отправляем первые 50 новых фраз
+                info_to_send = new_phrases_info[:50]
                 for i in range(0, len(info_to_send), 10):
                     batch = info_to_send[i:i+10]
-                    # Создаем одно сообщение для каждой партии
                     message_lines = [f"Найдены новые фразы ({len(new_phrases_info)} всего, показаны первые {len(info_to_send)}):"]
                     for info in batch:
                         message_lines.append(
@@ -221,68 +242,57 @@ def process_phrases_from_xlsx(df, chat_id):
                             f"---"
                         )
                     send_message(chat_id, "\n".join(message_lines))
-                
+
                 if len(new_phrases_info) > 50:
                      send_message(chat_id, f"... и еще {len(new_phrases_info) - 50} фраз.")
 
-        except Exception as e:
-            db.session.rollback()
-            app.logger.error(f"Ошибка БД при обработке фраз: {e}")
-            raise # Повторно вызываем исключение, чтобы оно передалось вверх
+            return phrases_added, phrases_updated, len(final_data)
 
-    return phrases_added, phrases_updated, len(final_data)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке данных DataFrame: {e}")
+        db.session.rollback()
+        raise
 
 
 def process_zip_and_xlsx(zip_content, original_filename, chat_id):
-    """
-    Распаковывает ZIP, находит XLSX, читает данные и сохраняет фразы.
-    """
+    """Распаковывает ZIP, находит XLSX, читает данные и сохраняет фразы."""
     try:
         dates_start, dates_end = extract_dates_from_filename_simple(original_filename)
-        app.logger.info(f"Даты из имени файла (для инфо): {dates_start} - {dates_end}")
+        logger.info(f"Даты из имени файла (для инфо): {dates_start} - {dates_end}")
 
         with zipfile.ZipFile(BytesIO(zip_content)) as zip_ref:
             # Поиск XLSX файла
-            xlsx_filename = None
-            for f in zip_ref.namelist():
-                if "аналитика поиска" in f.lower() and f.lower().endswith('.xlsx'):
-                    xlsx_filename = f
-                    break
+            xlsx_filename = next((f for f in zip_ref.namelist()
+                                  if "аналитика поиска" in f.lower() and f.lower().endswith('.xlsx')), None)
             if not xlsx_filename:
-                 # fallback на любой .xlsx
-                for f in zip_ref.namelist():
-                    if f.lower().endswith('.xlsx'):
-                        xlsx_filename = f
-                        app.logger.info(f"XLSX найден по расширению: {xlsx_filename}")
-                        break
+                # fallback на любой .xlsx
+                xlsx_filename = next((f for f in zip_ref.namelist() if f.lower().endswith('.xlsx')), None)
+                if xlsx_filename:
+                    logger.info(f"XLSX найден по расширению: {xlsx_filename}")
 
             if not xlsx_filename:
                 return "Ошибка: В ZIP архиве не найден файл .xlsx."
 
             # Чтение XLSX
             with zip_ref.open(xlsx_filename) as xlsx_file:
-                # Поиск листа "Детальная информация"
                 excel_file = pd.ExcelFile(xlsx_file)
-                target_sheet = None
-                for name in excel_file.sheet_names:
-                    if "детальная информация" in name.lower():
-                        target_sheet = name
-                        break
+                # Поиск листа "Детальная информация"
+                target_sheet = next((name for name in excel_file.sheet_names
+                                     if "детальная информация" in name.lower()), None)
                 if not target_sheet and len(excel_file.sheet_names) > 2:
-                    target_sheet = excel_file.sheet_names[2] # fallback на 3-й лист
-                    app.logger.info(f"Лист 'Детальная информация' не найден, используем: {target_sheet}")
+                    target_sheet = excel_file.sheet_names[2]
+                    logger.info(f"Лист 'Детальная информация' не найден, используем: {target_sheet}")
 
                 if not target_sheet:
-                     return f"Ошибка: Не найден лист с данными. Доступны: {excel_file.sheet_names}"
+                    return f"Ошибка: Не найден лист с данными. Доступны: {excel_file.sheet_names}"
 
-                # Считываем данные с 4-й строки как заголовки
-                xlsx_file.seek(0) # Сброс позиции файла
+                xlsx_file.seek(0)
+                # Читаем с 4-й строки как заголовки (header=3)
                 df = pd.read_excel(xlsx_file, sheet_name=target_sheet, header=3)
 
             if df.empty:
                 return "Ошибка: Лист с данными пуст."
 
-            # Обработка данных
             added, updated, total = process_phrases_from_xlsx(df, chat_id)
             return f"Импорт завершен.\nДобавлено: {added}\nОбновлено: {updated}\nВсего обработано: {total}"
 
@@ -291,7 +301,7 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
     except ValueError as e:
         return f"Ошибка данных: {e}"
     except Exception as e:
-        app.logger.error(f"Неожиданная ошибка: {e}\n{traceback.format_exc()}")
+        logger.error(f"Неожиданная ошибка: {e}\n{traceback.format_exc()}")
         return f"Ошибка: {str(e)}"
 
 
@@ -299,12 +309,10 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     """Обработчик вебхука Telegram."""
-    if not request.is_json:
-        app.logger.warning("Получен не JSON запрос")
-        return "Bad Request", 400
-
     json_data = request.get_json()
-    app.logger.debug(f"Получены данные: {json_data}")
+    if not json_data:
+        logger.warning("Получен не JSON запрос или пустое тело")
+        return "OK"
 
     message = json_data.get("message")
     if not message:
@@ -312,17 +320,23 @@ def webhook():
 
     chat_id = message.get("chat", {}).get("id")
     if not chat_id:
-        app.logger.warning("Не удалось получить chat_id")
+        logger.warning("Не удалось получить chat_id")
         return "OK"
 
     try:
         if "text" in message:
             text = message["text"]
             if text == "/start":
-                # Логика /start с проверкой пользователя и магазина
-                with app.app_context():
-                    user_exists = db.session.query(User.id).filter_by(chat_id=str(chat_id)).first() is not None
-                    shop_exists = db.session.query(Shop.shopId).filter_by(chatId=chat_id).first() is not None
+                # Используем кэшированную проверку
+                cache_key = str(chat_id)
+                if cache_key in _user_shop_cache:
+                    user_exists, shop_exists = _user_shop_cache[cache_key]
+                else:
+                    with app.app_context():
+                        user_exists = db.session.query(User.id).filter_by(chat_id=str(chat_id)).first() is not None
+                        shop_exists = db.session.query(Shop.shopId).filter_by(chatId=chat_id).first() is not None
+                    # Кэшируем результат (в реальном приложении может потребоваться инвалидация)
+                    # _user_shop_cache[cache_key] = (user_exists, shop_exists)
 
                 base_msg = "Привет! "
                 if user_exists:
@@ -332,22 +346,21 @@ def webhook():
                     else:
                         base_msg += ", но у вас нет зарегистрированных магазинов."
                 else:
-                    # Регистрация нового пользователя
                     username = message.get("from", {}).get("username", "Неизвестный")
                     with app.app_context():
                         new_user = User(chat_id=str(chat_id), username=username)
                         try:
                             db.session.add(new_user)
                             db.session.commit()
-                            app.logger.info(f"Новый пользователь {username} ({chat_id}) зарегистрирован.")
+                            logger.info(f"Новый пользователь {username} ({chat_id}) зарегистрирован.")
+                            # Инвалидируем кэш
+                            _user_shop_cache.pop(cache_key, None)
                             base_msg += "Вы зарегистрированы в базе"
-                            if shop_exists: # Проверяем снова, вдруг магазин есть
-                                 base_msg += " и у вас есть зарегистрированный магазин."
-                            else:
-                                 base_msg += ", но у вас нет зарегистрированных магазинов."
+                            # Повторная проверка магазина уже не нужна, так как пользователь новый
+                            base_msg += ", но у вас нет зарегистрированных магазинов."
                         except Exception as e:
                             db.session.rollback()
-                            app.logger.error(f"Ошибка регистрации пользователя {chat_id}: {e}")
+                            logger.error(f"Ошибка регистрации пользователя {chat_id}: {e}")
                             base_msg += "Произошла ошибка при регистрации."
 
                 send_message(chat_id, f"{base_msg}\n/words сканирование слов")
@@ -359,7 +372,6 @@ def webhook():
             doc = message["document"]
             if doc.get("file_name", "").lower().endswith('.zip'):
                 try:
-                    # Получение файла от Telegram
                     file_id = doc["file_id"]
                     file_info_res = requests.get(
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
@@ -375,24 +387,23 @@ def webhook():
                     )
                     file_content_res.raise_for_status()
 
-                    # Обработка
                     result_msg = process_zip_and_xlsx(file_content_res.content, doc["file_name"], chat_id)
                     send_message(chat_id, result_msg)
 
                 except requests.exceptions.RequestException as e:
                     error_msg = f"Ошибка загрузки файла из Telegram: {e}"
-                    app.logger.error(error_msg)
+                    logger.error(error_msg)
                     send_message(chat_id, error_msg)
                 except Exception as e:
                     error_msg = f"Ошибка обработки файла: {e}"
-                    app.logger.error(error_msg)
+                    logger.error(error_msg)
                     send_message(chat_id, error_msg)
             else:
                 send_message(chat_id, "Пожалуйста, отправьте файл в формате ZIP.")
 
     except Exception as e:
-        app.logger.error(f"Ошибка в webhook: {e}\n{traceback.format_exc()}")
-        # Не отправляем сообщение об ошибке пользователю в webhook, чтобы не зациклить
+        logger.error(f"Ошибка в webhook: {e}\n{traceback.format_exc()}")
+        # Не отправляем сообщение об ошибке пользователю в webhook
 
     return "OK"
 
@@ -402,16 +413,25 @@ def index():
     """Главная страница с информацией."""
     try:
         with app.app_context():
+            # Используем кэшированную проверку таблиц
+            tables_exist = _check_tables_exist()
+            if not tables_exist:
+                 return "<h1>Бот Tittle</h1><p>Инициализация БД...</p>"
+
             inspector = inspect(db.engine)
             tables = inspector.get_table_names()
 
             counts = {}
+            # Используем execute для более быстрых подсчетов
             if 'users' in tables:
-                counts['users'] = db.session.query(User).count()
+                result = db.session.execute(text("SELECT COUNT(*) FROM users")).scalar()
+                counts['users'] = result or 0
             if 'shops' in tables:
-                counts['shops'] = db.session.query(Shop).count()
+                result = db.session.execute(text("SELECT COUNT(*) FROM shops")).scalar()
+                counts['shops'] = result or 0
             if 'phrases' in tables:
-                counts['phrases'] = db.session.query(Phrase).count()
+                result = db.session.execute(text("SELECT COUNT(*) FROM phrases")).scalar()
+                counts['phrases'] = result or 0
 
         html = "<h1>Бот Tittle работает!</h1><ul>"
         for table, count in counts.items():
@@ -419,12 +439,17 @@ def index():
         html += "</ul>"
         return html
     except Exception as e:
-        app.logger.error(f"Ошибка на главной странице: {e}")
+        logger.error(f"Ошибка на главной странице: {e}")
         return f"<h1>Ошибка</h1><p>{str(e)}</p>", 500
 
 # --- Инициализация ---
-if __name__ != "__main__":
-    # Инициализация БД при запуске приложения (не при импорте)
+# if __name__ != "__main__": # Этот способ может не сработать надежно в WSGI
+#     initialize_database()
+
+# Более надежный способ инициализации при первом импорте/запросе
+@app.before_first_request
+def _initialize_on_first_request():
+    """Инициализирует БД при первом запросе к приложению."""
     initialize_database()
 
 if __name__ == "__main__":
