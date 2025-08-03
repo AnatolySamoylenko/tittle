@@ -4,17 +4,17 @@ import re
 import zipfile
 import traceback
 import logging
-import time # Для пауз между запросами
-import json # Для работы с JSON ответами
-import random # Для генерации случайной задержки
-import threading # Для запуска длительной задачи в фоне
+import time
+import json
+import random
+import threading
 from io import BytesIO
 
 import requests
 import pandas as pd
 from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect, text, MetaData
+from sqlalchemy import inspect, text, MetaData, Table, Column, Integer, String, Text
 from sqlalchemy.exc import OperationalError
 
 # --- Настройка логирования ---
@@ -40,108 +40,133 @@ if not TELEGRAM_TOKEN:
     logger.warning("Переменная окружения TELEGRAM_TOKEN не установлена!")
 
 # --- Модели БД ---
+# Базовая модель пользователя - общая для всех
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     chat_id = db.Column(db.String(50), unique=True, nullable=False)
     username = db.Column(db.String(100))
 
-class Shop(db.Model):
-    __tablename__ = 'shops'
-    shopId = db.Column(db.Integer, primary_key=True, autoincrement=False)
-    API = db.Column(db.Text, nullable=False)
-    chatId = db.Column(db.Integer, nullable=False)
+# --- Вспомогательные функции для работы с персональными таблицами ---
+def get_personal_shop_table_name(chat_id):
+    """Генерирует имя персональной таблицы shops для пользователя."""
+    return f'shops_{chat_id}'
 
-class Phrase(db.Model):
-    __tablename__ = 'phrases'
-    phrase = db.Column(db.Text, primary_key=True, nullable=False)
-    qntyPerDay = db.Column(db.Integer, nullable=False)
-    subject = db.Column(db.Text, nullable=False)
-    # Новые поля (убраны default из создания объектов)
-    preset = db.Column(db.Integer, nullable=False) # default=0 убрано
-    normQuery = db.Column(db.Text, nullable=True) # default=None убрано
-    auto = db.Column(db.Integer, nullable=False) # default=0 убрано
-    auction = db.Column(db.Integer, nullable=False) # default=0 убрано
-    total = db.Column(db.Integer, nullable=False) # default=0 убрано
+def get_personal_phrase_table_name(chat_id):
+    """Генерирует имя персональной таблицы phrases для пользователя."""
+    return f'phrases_{chat_id}'
 
-# --- Вспомогательные функции ---
-def _check_and_update_phrases_table():
-    """Проверяет структуру таблицы phrases и обновляет её при необходимости."""
+def create_personal_shop_table(chat_id):
+    """Создает персональную таблицу shops для пользователя, если она не существует."""
+    table_name = get_personal_shop_table_name(chat_id)
     with app.app_context():
-        try:
-            inspector = inspect(db.engine)
-            if 'phrases' not in inspector.get_table_names():
-                logger.info("Таблица 'phrases' не найдена. Будет создана при инициализации БД.")
-                return False
+        inspector = inspect(db.engine)
+        if table_name not in inspector.get_table_names():
+            logger.info(f"Создаем персональную таблицу shops: {table_name}")
+            metadata = MetaData()
+            table = Table(table_name, metadata,
+                          Column('shopId', Integer, primary_key=True, autoincrement=False),
+                          Column('API', Text, nullable=False),
+                          Column('chatId', Integer, nullable=False),
+            )
+            metadata.create_all(db.engine)
+            logger.info(f"Таблица {table_name} создана.")
+        else:
+            logger.debug(f"Персональная таблица shops {table_name} уже существует.")
 
-            existing_columns = {col['name'] for col in inspector.get_columns('phrases')}
-            logger.debug(f"Существующие колонки в 'phrases': {existing_columns}")
+def create_personal_phrase_table(chat_id):
+    """Создает персональную таблицу phrases для пользователя, если она не существует."""
+    table_name = get_personal_phrase_table_name(chat_id)
+    with app.app_context():
+        inspector = inspect(db.engine)
+        if table_name not in inspector.get_table_names():
+            logger.info(f"Создаем персональную таблицу phrases: {table_name}")
+            metadata = MetaData()
+            table = Table(table_name, metadata,
+                          Column('phrase', Text, primary_key=True, nullable=False),
+                          Column('qntyPerDay', Integer, nullable=False),
+                          Column('subject', Text, nullable=False),
+                          Column('preset', Integer, nullable=False),
+                          Column('normQuery', Text, nullable=True),
+                          Column('auto', Integer, nullable=False),
+                          Column('auction', Integer, nullable=False),
+                          Column('total', Integer, nullable=False),
+            )
+            metadata.create_all(db.engine)
+            logger.info(f"Таблица {table_name} создана.")
+        else:
+            logger.debug(f"Персональная таблица phrases {table_name} уже существует.")
 
-            temp_metadata = MetaData()
-            temp_table = Phrase.__table__.to_metadata(temp_metadata)
-            expected_columns = {col.name for col in temp_table.columns}
-            logger.debug(f"Ожидаемые колонки в 'phrases': {expected_columns}")
+# --- Функции для работы с данными в персональных таблицах ---
+def get_personal_shop_model(chat_id):
+    """Динамически создает модель SQLAlchemy для персональной таблицы shops пользователя."""
+    table_name = get_personal_shop_table_name(chat_id)
+    create_personal_shop_table(chat_id)
+    
+    class PersonalShop(db.Model):
+        __tablename__ = table_name
+        __table_args__ = {'extend_existing': True}
+        shopId = db.Column(db.Integer, primary_key=True, autoincrement=False)
+        API = db.Column(db.Text, nullable=False)
+        chatId = db.Column(db.Integer, nullable=False)
+        
+    return PersonalShop
 
-            if existing_columns == expected_columns:
-                logger.info("Структура таблицы 'phrases' соответствует модели.")
-                return True
-            else:
-                logger.warning(f"Несовпадение структуры таблицы 'phrases'. "
-                               f"Существующие: {existing_columns}. Ожидаемые: {expected_columns}. "
-                               f"Таблица будет пересоздана.")
-                db.session.execute(text("DROP TABLE phrases"))
-                db.session.commit()
-                _tables_exist_cache.clear()
-                return False
-
-        except Exception as e:
-            logger.error(f"Ошибка при проверке/обновлении таблицы 'phrases': {e}")
-            try:
-                db.session.execute(text("DROP TABLE IF EXISTS phrases"))
-                db.session.commit()
-                _tables_exist_cache.clear()
-                logger.info("Таблица 'phrases' будет пересоздана из-за ошибки проверки.")
-            except Exception as drop_e:
-                logger.error(f"Ошибка при принудительном удалении таблицы 'phrases': {drop_e}")
-            return False
+def get_personal_phrase_model(chat_id):
+    """Динамически создает модель SQLAlchemy для персональной таблицы phrases пользователя."""
+    table_name = get_personal_phrase_table_name(chat_id)
+    create_personal_phrase_table(chat_id)
+    
+    class PersonalPhrase(db.Model):
+        __tablename__ = table_name
+        __table_args__ = {'extend_existing': True}
+        phrase = db.Column(db.Text, primary_key=True, nullable=False)
+        qntyPerDay = db.Column(db.Integer, nullable=False)
+        subject = db.Column(db.Text, nullable=False)
+        preset = db.Column(db.Integer, nullable=False)
+        normQuery = db.Column(db.Text, nullable=True)
+        auto = db.Column(db.Integer, nullable=False)
+        auction = db.Column(db.Integer, nullable=False)
+        total = db.Column(db.Integer, nullable=False)
+        
+        def __repr__(self):
+            return f"<PersonalPhrase(phrase='{self.phrase}', qntyPerDay={self.qntyPerDay}, subject='{self.subject}')>"
+            
+    return PersonalPhrase
 
 def _check_tables_exist():
-    """Проверяет существование таблиц, используя кэш."""
+    """Проверяет существование основных таблиц (users), используя кэш."""
     global _tables_exist_cache
-    cache_key = "tables_exist"
+    cache_key = "main_tables_exist"
     if cache_key in _tables_exist_cache:
         return _tables_exist_cache[cache_key]
 
     try:
         inspector = inspect(db.engine)
         existing_tables = set(inspector.get_table_names())
-        required_tables = {'users', 'shops'}
-        phrases_ok = _check_and_update_phrases_table()
-
-        result = required_tables.issubset(existing_tables) and phrases_ok
+        required_tables = {'users'}
+        
+        result = required_tables.issubset(existing_tables)
         _tables_exist_cache[cache_key] = result
         if not result:
             missing = required_tables - existing_tables
-            if missing:
-                logger.info(f"Отсутствующие таблицы: {missing}")
-            if not phrases_ok:
-                logger.info("Таблица 'phrases' требует пересоздания или создания.")
+            logger.info(f"Отсутствующие основные таблицы: {missing}")
         return result
     except Exception as e:
-        logger.error(f"Ошибка при проверке таблиц: {e}")
+        logger.error(f"Ошибка при проверке основных таблиц: {e}")
         return False
 
 def initialize_database_if_needed():
-    """Ленивая инициализация БД при первом обращении."""
+    """Ленивая инициализация основных таблиц БД при первом обращении."""
     if not _check_tables_exist():
-        logger.info("Таблицы отсутствуют или имеют неактуальную структуру, инициализируем БД...")
+        logger.info("Основные таблицы отсутствуют, инициализируем БД...")
         with app.app_context():
             try:
                 db.create_all()
                 _tables_exist_cache.clear()
-                logger.info("Таблицы успешно созданы или обновлены.")
+                logger.info("Основные таблицы успешно созданы.")
             except Exception as e:
-                logger.error(f"Ошибка при создании/обновлении таблиц: {e}")
+                logger.error(f"Ошибка при создании основных таблиц: {e}")
                 raise
 
 def send_message(chat_id, text):
@@ -167,14 +192,16 @@ def extract_dates_from_filename_simple(filename):
         return match.group(1), match.group(2)
     return None, None
 
-# --- ОБНОВЛЕННАЯ ФУНКЦИЯ: Построчная обработка XLSX ---
+# --- ОБНОВЛЕННАЯ ФУНКЦИЯ: Построчная обработка XLSX с персональными таблицами ---
 def process_phrases_from_xlsx(df, chat_id):
     """
-    Обрабатывает DataFrame с данными фраз и сохраняет их в БД ПОСТРОЧНО.
+    Обрабатывает DataFrame с данными фраз и сохраняет их в ПЕРСОНАЛЬНУЮ БД ПОСТРОЧНО.
     Использует колонки: 0 (Поисковый запрос), 3 (Запросов в среднем за день), 5 (Больше всего заказов в предмете).
     """
-    logger.info(f"Начинаем ПОСТРОЧНУЮ обработку DataFrame. Форма: {df.shape}")
+    logger.info(f"Начинаем ПОСТРОЧНУЮ обработку DataFrame для пользователя {chat_id}. Форма: {df.shape}")
 
+    PhraseModel = get_personal_phrase_model(chat_id)
+    
     required_indices = {'phrase_col_idx': 0, 'qnty_col_idx': 3, 'subject_col_idx': 5}
     max_required_idx = max(required_indices.values())
 
@@ -184,7 +211,6 @@ def process_phrases_from_xlsx(df, chat_id):
             f"Требуется как минимум {max_required_idx + 1} колонок. Найдено {len(df.columns)}."
         )
 
-    # Выбираем нужные колонки
     try:
         data_slice = df.iloc[:, [required_indices['phrase_col_idx'],
                                  required_indices['qnty_col_idx'],
@@ -195,10 +221,10 @@ def process_phrases_from_xlsx(df, chat_id):
         raise ValueError(f"Ошибка при выборе колонок: {e}")
 
     total_rows = len(data_slice)
-    logger.info(f"Будет обработано {total_rows} строк.")
+    logger.info(f"Будет обработано {total_rows} строк для пользователя {chat_id}.")
 
     if total_rows == 0:
-        return 0, 0, 0 # phrases_added, phrases_updated, total_processed
+        return 0, 0, 0
 
     phrases_added = 0
     phrases_updated = 0
@@ -206,17 +232,14 @@ def process_phrases_from_xlsx(df, chat_id):
 
     with app.app_context():
         try:
-            # Итерируемся по строкам DataFrame
             for index, row in data_slice.iterrows():
                 processed_count += 1
-                # --- Обработка одной строки ---
                 try:
-                    # 1. Очистка данных для текущей строки
                     phrase_raw = row['phrase_raw']
                     phrase = str(phrase_raw).strip() if pd.notna(phrase_raw) else ""
                     
                     if not phrase:
-                        logger.debug(f"[{processed_count}/{total_rows}] Пропущена пустая фраза в строке {index}")
+                        logger.debug(f"[{processed_count}/{total_rows}] Пропущена пустая фраза в строке {index} для пользователя {chat_id}")
                         continue
 
                     qntyPerDay_raw = row['qntyPerDay_raw']
@@ -225,76 +248,73 @@ def process_phrases_from_xlsx(df, chat_id):
                     subject_raw = row['subject_raw']
                     subject = str(subject_raw).strip() if pd.notna(subject_raw) else ""
 
-                    # 2. Проверка существования фразы в БД
-                    existing_phrase = db.session.get(Phrase, phrase)
+                    existing_phrase = db.session.get(PhraseModel, phrase)
                     is_new = existing_phrase is None
 
-                    # 3. Создание или обновление объекта
                     if is_new:
-                        # Создаем новую фразу
-                        phrase_obj = Phrase(
+                        phrase_obj = PhraseModel(
                             phrase=phrase,
                             qntyPerDay=qntyPerDay,
-                            subject=subject
-                            # preset, normQuery, auto, auction, total будут установлены позже (по умолчанию 0/None)
+                            subject=subject,
+                            preset=0,
+                            normQuery=None,
+                            auto=0,
+                            auction=0,
+                            total=0
                         )
                         db.session.add(phrase_obj)
                         phrases_added += 1
-                        logger.debug(f"[{processed_count}/{total_rows}] Добавлена новая фраза: '{phrase}'")
+                        logger.debug(f"[{processed_count}/{total_rows}] Добавлена новая фраза: '{phrase}' для пользователя {chat_id}")
                     else:
-                        # Удаляем существующую и добавляем обновленную
                         db.session.delete(existing_phrase)
-                        new_phrase_obj = Phrase(
+                        new_phrase_obj = PhraseModel(
                             phrase=phrase,
                             qntyPerDay=qntyPerDay,
-                            subject=subject
+                            subject=subject,
+                            preset=0,
+                            normQuery=None,
+                            auto=0,
+                            auction=0,
+                            total=0
                         )
                         db.session.add(new_phrase_obj)
                         phrases_updated += 1
-                        logger.debug(f"[{processed_count}/{total_rows}] Обновлена фраза: '{phrase}'")
+                        logger.debug(f"[{processed_count}/{total_rows}] Обновлена фраза: '{phrase}' для пользователя {chat_id}")
 
-                    # 4. Коммитим изменения для каждой строки
-                    # Это позволяет избежать накопления большого количества изменений в сессии
                     db.session.commit()
                     
-                    # 5. Отправка уведомления о новой фразе (только для новых)
                     if is_new:
                          message_text = f"Новая фраза:\nФраза: {phrase}\nЗапросов в день: {qntyPerDay}\nПредмет: {subject}"
                          send_message(chat_id, message_text)
 
                 except (ValueError, TypeError) as row_e:
-                    logger.error(f"[{processed_count}/{total_rows}] Ошибка обработки строки {index}: {row_e}")
-                    db.session.rollback() # Откатываем транзакцию для этой строки
-                    # Продолжаем обработку следующей строки
+                    logger.error(f"[{processed_count}/{total_rows}] Ошибка обработки строки {index} для пользователя {chat_id}: {row_e}")
+                    db.session.rollback()
                     continue
                 except Exception as row_e:
-                    logger.error(f"[{processed_count}/{total_rows}] Неожиданная ошибка в строке {index}: {row_e}")
+                    logger.error(f"[{processed_count}/{total_rows}] Неожиданная ошибка в строке {index} для пользователя {chat_id}: {row_e}")
                     db.session.rollback()
                     continue
 
-                # --- Отправка промежуточного отчета ---
                 if processed_count % 100 == 0 or processed_count == total_rows:
                      progress_msg = f"Обработано {processed_count} из {total_rows} строк. Добавлено: {phrases_added}, Обновлено: {phrases_updated}"
-                     logger.info(progress_msg)
-                     # Отправляем сообщение каждые 1000 строк или в конце
+                     logger.info(f"{progress_msg} для пользователя {chat_id}")
                      if processed_count % 1000 == 0 or processed_count == total_rows:
                          send_message(chat_id, progress_msg)
 
         except Exception as e:
-            logger.error(f"Критическая ошибка в процессе обработки: {e}")
+            logger.error(f"Критическая ошибка в процессе обработки для пользователя {chat_id}: {e}")
             db.session.rollback()
-            # Даже при критической ошибке, часть данных могла быть сохранена
             final_msg = f"Задача прервана. Обработано {processed_count} строк. Добавлено: {phrases_added}, Обновлено: {phrases_updated}. Ошибка: {e}"
             send_message(chat_id, final_msg)
-            # Перебрасываем исключение, чтобы оно отобразилось в основном обработчике
             raise 
 
-    logger.info(f"Построчная обработка завершена. Всего: {total_rows}, Добавлено: {phrases_added}, Обновлено: {phrases_updated}")
+    logger.info(f"Построчная обработка завершена для пользователя {chat_id}. Всего: {total_rows}, Добавлено: {phrases_added}, Обновлено: {phrases_updated}")
     return phrases_added, phrases_updated, processed_count
 
 
 def process_zip_and_xlsx(zip_content, original_filename, chat_id):
-    """Распаковывает ZIP, находит XLSX, читает данные и сохраняет фразы."""
+    """Распаковывает ZIP, находит XLSX, читает данные и сохраняет фразы в ПЕРСОНАЛЬНУЮ таблицу."""
     try:
         dates_start, dates_end = extract_dates_from_filename_simple(original_filename)
         logger.info(f"Даты из имени файла (для инфо): {dates_start} - {dates_end}")
@@ -328,7 +348,7 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
                 return "Ошибка: Лист с данными пуст."
 
             added, updated, total = process_phrases_from_xlsx(df, chat_id)
-            return f"Импорт завершен.\nДобавлено: {added}\nОбновлено: {updated}\nВсего обработано: {total}"
+            return f"Импорт завершен для пользователя {chat_id}.\nДобавлено: {added}\nОбновлено: {updated}\nВсего обработано: {total}"
 
     except zipfile.BadZipFile:
         return "Ошибка: Файл не является корректным ZIP архивом."
@@ -338,22 +358,23 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
         logger.error(f"Неожиданная ошибка: {e}\n{traceback.format_exc()}")
         return f"Ошибка: {str(e)}"
 
-# --- НОВАЯ ФУНКЦИЯ: Логика команды /searchads ---
+# --- НОВАЯ ФУНКЦИЯ: Логика команды /searchads с персональными таблицами ---
 def search_ads_task(chat_id):
     """
-    Фоновая задача для выполнения поисковых запросов и обновления данных в БД.
+    Фоновая задача для выполнения поисковых запросов и обновления данных в ПЕРСОНАЛЬНОЙ БД.
     """
-    logger.info(f"Запуск задачи search_ads для chat_id: {chat_id}")
-    send_message(chat_id, "Начинаю выполнение /searchads. Это может занять некоторое время...")
+    logger.info(f"Запуск задачи search_ads для пользователя chat_id: {chat_id}")
+    send_message(chat_id, f"Начинаю выполнение /searchads. Это может занять некоторое время...")
 
     try:
+        PhraseModel = get_personal_phrase_model(chat_id)
+        
         with app.app_context():
-            # 1. Получаем все фразы из БД
-            phrases = db.session.query(Phrase).all()
-            logger.info(f"Найдено {len(phrases)} фраз для обработки.")
+            phrases = db.session.query(PhraseModel).all()
+            logger.info(f"Найдено {len(phrases)} фраз для обработки у пользователя {chat_id}.")
 
             if not phrases:
-                send_message(chat_id, "В таблице phrases нет данных для обработки.")
+                send_message(chat_id, "В вашей персональной таблице phrases нет данных для обработки.")
                 return
 
             base_url = "https://search.wb.ru/exactmatch/ru/common/v14/search"
@@ -363,7 +384,7 @@ def search_ads_task(chat_id):
                 "curr": "rub",
                 "dest": "-1257484",
                 "lang": "ru",
-                "page": "1", # Используем первую страницу
+                "page": "1",
                 "resultset": "catalog",
                 "sort": "popular",
                 "spp": "30",
@@ -375,17 +396,14 @@ def search_ads_task(chat_id):
 
             for i, phrase_obj in enumerate(phrases):
                 phrase_text = phrase_obj.phrase
-                logger.debug(f"[{i+1}/{len(phrases)}] Обрабатываем фразу: '{phrase_text}'")
+                logger.debug(f"[{i+1}/{len(phrases)}] Обрабатываем фразу: '{phrase_text}' для пользователя {chat_id}")
 
-                # Отправляем промежуточное сообщение каждые 100 фраз
                 if (i + 1) % 100 == 0:
                     send_message(chat_id, f"Обработано {i+1} из {len(phrases)} фраз...")
 
-                # Формируем параметры запроса
                 params = params_template.copy()
                 params["query"] = phrase_text
 
-                # Логика повторных запросов
                 max_total_retries = 5
                 max_preset_retries = 3
                 total_retries = 0
@@ -395,9 +413,8 @@ def search_ads_task(chat_id):
 
                 while not success and (total_retries < max_total_retries or preset_retries < max_preset_retries):
                     try:
-                        # Пауза от 3 до 7 секунд
                         delay = random.uniform(3, 7)
-                        logger.debug(f"Пауза {delay:.2f} секунд перед запросом...")
+                        logger.debug(f"Пауза {delay:.2f} секунд перед запросом для '{phrase_text}'...")
                         time.sleep(delay)
 
                         response = requests.get(base_url, params=params, timeout=15)
@@ -408,46 +425,41 @@ def search_ads_task(chat_id):
                         total = response_data.get("total", 0)
                         preset = metadata.get("presetId", 0)
 
-                        logger.debug(f"Ответ для '{phrase_text}': total={total}, preset={preset}")
+                        logger.debug(f"Ответ для '{phrase_text}' пользователя {chat_id}: total={total}, preset={preset}")
 
-                        # Проверка условий повтора
                         if total == 0 and total_retries < max_total_retries:
                             total_retries += 1
-                            logger.info(f"Total=0 для '{phrase_text}', повтор ({total_retries}/{max_total_retries})...")
-                            continue # Повторить запрос
+                            logger.info(f"Total=0 для '{phrase_text}' пользователя {chat_id}, повтор ({total_retries}/{max_total_retries})...")
+                            continue
 
                         if preset == 0 and preset_retries < max_preset_retries:
                             preset_retries += 1
-                            logger.info(f"Preset=0 для '{phrase_text}', повтор ({preset_retries}/{max_preset_retries})...")
-                            continue # Повторить запрос
+                            logger.info(f"Preset=0 для '{phrase_text}' пользователя {chat_id}, повтор ({preset_retries}/{max_preset_retries})...")
+                            continue
 
-                        # Если дошли до этой точки, значит условия повтора не выполняются
                         success = True
 
                     except requests.exceptions.RequestException as e:
-                        logger.error(f"Ошибка запроса для фразы '{phrase_text}': {e}")
+                        logger.error(f"Ошибка запроса для фразы '{phrase_text}' пользователя {chat_id}: {e}")
                         errors.append(f"Фраза '{phrase_text}': Ошибка запроса - {e}")
-                        break # Не повторяем при сетевых ошибках в рамках этой задачи
+                        break
                     except json.JSONDecodeError as e:
-                        logger.error(f"Ошибка парсинга JSON для фразы '{phrase_text}': {e}")
+                        logger.error(f"Ошибка парсинга JSON для фразы '{phrase_text}' пользователя {chat_id}: {e}")
                         errors.append(f"Фраза '{phrase_text}': Ошибка парсинга JSON - {e}")
                         break
                     except Exception as e:
-                        logger.error(f"Неожиданная ошибка для фразы '{phrase_text}': {e}")
+                        logger.error(f"Неожиданная ошибка для фразы '{phrase_text}' пользователя {chat_id}: {e}")
                         errors.append(f"Фраза '{phrase_text}': Неожиданная ошибка - {e}")
                         break
 
                 if not success:
-                    logger.warning(f"Не удалось получить корректные данные для фразы '{phrase_text}' после повторов.")
+                    logger.warning(f"Не удалось получить корректные данные для фразы '{phrase_text}' пользователя {chat_id} после повторов.")
                     errors.append(f"Фраза '{phrase_text}': Не удалось получить данные после повторов.")
-                    # Продолжаем со следующей фразой
                     continue
 
-                # --- Обработка успешного ответа ---
                 try:
-                    # Подсчет tp
-                    tpc = 0 # tp="c"
-                    tpb = 0 # tp="b"
+                    tpc = 0
+                    tpb = 0
                     products = response_data.get("products", [])
                     for product in products:
                         log = product.get("log", {})
@@ -457,25 +469,22 @@ def search_ads_task(chat_id):
                         elif tp == "b":
                             tpb += 1
 
-                    # Получение других данных
                     metadata = response_data.get("metadata", {})
                     total = response_data.get("total", 0)
                     norm_query = metadata.get("normquery")
-                    preset_id = metadata.get("presetId", 0) # Используем из ответа
+                    preset_id = metadata.get("presetId", 0)
 
-                    logger.debug(f"Результаты для '{phrase_text}': tpc={tpc}, tpb={tpb}, total={total}, normQuery='{norm_query}', preset={preset_id}")
+                    logger.debug(f"Результаты для '{phrase_text}' пользователя {chat_id}: tpc={tpc}, tpb={tpb}, total={total}, normQuery='{norm_query}', preset={preset_id}")
 
-                    # Обновление записи в БД
                     phrase_obj.auction = tpc
                     phrase_obj.auto = tpb
                     phrase_obj.total = total
                     phrase_obj.normQuery = norm_query
-                    phrase_obj.preset = preset_id # Обновляем поле preset
+                    phrase_obj.preset = preset_id
 
-                    db.session.commit() # Коммитим каждую запись
+                    db.session.commit()
                     updated_count += 1
 
-                    # Отправка результата в Telegram
                     message = (
                         f"✅ Обновлена фраза: {phrase_text}\n"
                         f"   Auction (tp='c'): {tpc}\n"
@@ -487,18 +496,16 @@ def search_ads_task(chat_id):
                     send_message(chat_id, message)
 
                 except Exception as e:
-                    logger.error(f"Ошибка обработки/обновления данных для фразы '{phrase_text}': {e}")
+                    logger.error(f"Ошибка обработки/обновления данных для фразы '{phrase_text}' пользователя {chat_id}: {e}")
                     errors.append(f"Фраза '{phrase_text}': Ошибка обработки данных - {e}")
-                    db.session.rollback() # Откатываем в случае ошибки обновления
+                    db.session.rollback()
 
-            # --- Финальный отчет ---
-            final_message_lines = [f"✅ Задача /searchads завершена."]
+            final_message_lines = [f"✅ Задача /searchads завершена для пользователя {chat_id}."]
             final_message_lines.append(f"   Обработано фраз: {len(phrases)}")
             final_message_lines.append(f"   Успешно обновлено: {updated_count}")
 
             if errors:
                 final_message_lines.append(f"   Ошибок: {len(errors)}")
-                # Отправляем первые 5 ошибок
                 for err in errors[:5]:
                     final_message_lines.append(f"   - {err}")
                 if len(errors) > 5:
@@ -507,11 +514,43 @@ def search_ads_task(chat_id):
             send_message(chat_id, "\n".join(final_message_lines))
 
     except Exception as e:
-        logger.error(f"Критическая ошибка в задаче search_ads: {e}")
+        logger.error(f"Критическая ошибка в задаче search_ads для пользователя {chat_id}: {e}")
         send_message(chat_id, f"❌ Критическая ошибка в задаче /searchads: {e}")
 
+# --- НОВАЯ ФУНКЦИЯ: Логика команды /clearwords ---
+def clear_phrases_task(chat_id):
+    """
+    Фоновая задача для очистки персональной таблицы phrases пользователя.
+    """
+    logger.info(f"Запуск задачи clear_phrases для пользователя chat_id: {chat_id}")
+    send_message(chat_id, "Начинаю очистку таблицы phrases...")
 
-# --- Telegram Webhook (исправленный фрагмент) ---
+    try:
+        # Получаем персональную модель для этого пользователя
+        PhraseModel = get_personal_phrase_model(chat_id)
+        
+        with app.app_context():
+            # Подсчитываем количество записей перед удалением
+            count_before = db.session.query(PhraseModel).count()
+            
+            if count_before == 0:
+                send_message(chat_id, "Ваша таблица phrases уже пуста.")
+                return
+
+            # Удаляем все записи
+            deleted_count = db.session.query(PhraseModel).delete()
+            db.session.commit()
+            
+            logger.info(f"Удалено {deleted_count} записей из phrases_{chat_id}")
+            send_message(chat_id, f"✅ Таблица phrases успешно очищена. Удалено записей: {deleted_count}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в задаче clear_phrases для пользователя {chat_id}: {e}")
+        with app.app_context():
+            db.session.rollback()
+        send_message(chat_id, f"❌ Ошибка при очистке таблицы phrases: {e}")
+
+# --- Telegram Webhook ---
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     """Обработчик вебхука Telegram."""
@@ -532,28 +571,20 @@ def webhook():
         logger.warning("Не удалось получить chat_id")
         return "OK"
 
-    # ... (остальной код функции webhook остается без изменений) ...
-    # --- Конец исправленного фрагмента ---
-
     try:
         if "text" in message:
             text = message["text"]
             if text == "/start":
                 cache_key = str(chat_id)
                 if cache_key in _user_shop_cache:
-                    user_exists, shop_exists = _user_shop_cache[cache_key]
+                    user_exists = _user_shop_cache[cache_key]
                 else:
                     with app.app_context():
                         user_exists = db.session.query(User.id).filter_by(chat_id=str(chat_id)).first() is not None
-                        shop_exists = db.session.query(Shop.shopId).filter_by(chatId=chat_id).first() is not None
-
+                    
                 base_msg = "Привет! "
                 if user_exists:
-                    base_msg += "Вы есть в базе"
-                    if shop_exists:
-                        base_msg += " и у вас есть зарегистрированный магазин."
-                    else:
-                        base_msg += ", но у вас нет зарегистрированных магазинов."
+                    base_msg += "Вы есть в базе."
                 else:
                     username = message.get("from", {}).get("username", "Неизвестный")
                     with app.app_context():
@@ -563,25 +594,35 @@ def webhook():
                             db.session.commit()
                             logger.info(f"Новый пользователь {username} ({chat_id}) зарегистрирован.")
                             _user_shop_cache.pop(cache_key, None)
-                            base_msg += "Вы зарегистрированы в базе"
-                            base_msg += ", но у вас нет зарегистрированных магазинов."
+                            base_msg += "Вы зарегистрированы в базе."
                         except Exception as e:
                             db.session.rollback()
                             logger.error(f"Ошибка регистрации пользователя {chat_id}: {e}")
                             base_msg += "Произошла ошибка при регистрации."
 
-                send_message(chat_id, f"{base_msg}\n/words сканирование слов")
+                # --- ИЗМЕНЕНО: Добавлены новые строки в меню ---
+                menu_msg = (
+                    f"{base_msg}\n"
+                    f"/words - сканирование слов\n"
+                    f"/searchads - поиск реклам по словам\n"
+                    f"/clearwords - очистка фраз"
+                )
+                send_message(chat_id, menu_msg)
 
             elif text == "/words":
                 send_message(chat_id, "Пожалуйста, отправьте ZIP файл с XLSX аналитики поиска.")
 
-            # --- НОВАЯ КОМАНДА ---
             elif text == "/searchads":
-                # Запускаем длительную задачу в фоновом потоке
-                # чтобы не блокировать вебхук
                 thread = threading.Thread(target=search_ads_task, args=(chat_id,))
                 thread.start()
                 send_message(chat_id, "Команда /searchads принята. Задача запущена в фоновом режиме. Результаты будут отправлены по мере обработки.")
+
+            # --- НОВАЯ КОМАНДА ---
+            elif text == "/clearwords":
+                # Запускаем задачу очистки в фоновом потоке
+                thread = threading.Thread(target=clear_phrases_task, args=(chat_id,))
+                thread.start()
+                send_message(chat_id, "Команда /clearwords принята. Задача очистки запущена.")
 
         elif "document" in message:
             doc = message["document"]
@@ -641,12 +682,9 @@ def index():
             if 'users' in tables:
                 result = db.session.execute(text("SELECT COUNT(*) FROM users")).scalar()
                 counts['users'] = result or 0
-            if 'shops' in tables:
-                result = db.session.execute(text("SELECT COUNT(*) FROM shops")).scalar()
-                counts['shops'] = result or 0
-            if 'phrases' in tables:
-                result = db.session.execute(text("SELECT COUNT(*) FROM phrases")).scalar()
-                counts['phrases'] = result or 0
+            
+            personal_tables = [t for t in tables if t.startswith('phrases_') or t.startswith('shops_')]
+            counts['personal_tables'] = len(personal_tables)
 
         html = "<h1>Бот Tittle работает!</h1><ul>"
         for table, count in counts.items():
