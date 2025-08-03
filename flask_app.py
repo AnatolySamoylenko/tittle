@@ -9,7 +9,11 @@ import json
 import random
 import threading
 from io import BytesIO
-from urllib.parse import quote_plus
+from urllib.parse import urlencode, quote_plus
+
+# --- ИЗМЕНЕНО: Импорты для Playwright ---
+from playwright.sync_api import sync_playwright, TimeoutError, Error
+# --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 import requests
 import pandas as pd
@@ -207,8 +211,63 @@ def extract_dates_from_filename_simple(filename):
         return match.group(1), match.group(2)
     return None, None
 
+# --- НОВАЯ ФУНКЦИЯ: Поиск одной фразы через Playwright ---
+def search_single_phrase(page, phrase_text, chat_id):
+    """
+    Выполняет поиск одной фразы через Playwright и возвращает JSON-данные.
+    """
+    logger.info(f"Начинаю поиск фразы '{phrase_text}' для пользователя {chat_id} через Playwright")
+
+    # --- ИЗМЕНЕНО: Формирование URL для перехода ---
+    base_url = "https://search.wb.ru/exactmatch/ru/common/v14/search"
+    params = {
+        "ab_testing": "false",
+        "appType": "1", # Веб-версия
+        "curr": "rub",
+        "dest": "-1257786", # Немного измененный dest
+        "lang": "ru",
+        "page": "1",
+        "query": phrase_text,
+        "resultset": "catalog",
+        "sort": "popular",
+        "spp": "20", # Изменено с 99 на 20
+        "suppressSpellcheck": "false",
+        "uclusters": "1", # Изменено с 0 на 1
+    }
+    
+    # Строим полный URL с параметрами
+    full_url = f"{base_url}?{urlencode(params)}"
+    logger.debug(f"Перехожу по URL: {full_url}")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    # --- ИЗМЕНЕНО: Переход на страницу и ожидание ответа ---
+    page.goto(full_url)
+    
+    # Ждем немного, чтобы страница загрузилась
+    page.wait_for_timeout(5000) 
+    
+    # Получаем содержимое страницы (ожидаем JSON)
+    content = page.content()
+    logger.debug(f"Получено содержимое страницы для '{phrase_text}' (первые 500 символов): {content[:500]}...")
+    
+    # --- ИЗМЕНЕНО: Проверка и парсинг JSON ---
+    import json
+    try:
+        # Пробуем распарсить как JSON
+        data = json.loads(content)
+        logger.info(f"Успешно распарсен JSON для фразы '{phrase_text}'")
+        return data
+    except json.JSONDecodeError:
+        # Если не JSON, проверим, есть ли в содержимом признаки ошибки или редиректа
+        if "WBSearchResult" in content or "wildberries" in content.lower():
+             logger.warning(f"Страница для '{phrase_text}' похожа на HTML главной страницы, а не на API-ответ.")
+             raise ValueError("Получен HTML-ответ вместо JSON. API может быть недоступно по этому URL или требует авторизации.")
+        else:
+             logger.error(f"Не удалось распарсить ответ для '{phrase_text}' как JSON. Содержимое: {content[:200]}...")
+             raise ValueError("Ответ не является корректным JSON.")
+    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
 # --- ОБНОВЛЕННАЯ ФУНКЦИЯ: Построчная обработка XLSX с персональными таблицами ---
-# НАЧИНАЕТ обработку С САМОЙ ПЕРВОЙ СТРОКИ ДАННЫХ (без пропуска первых 2 строк)
 def process_phrases_from_xlsx(df, chat_id):
     """
     Обрабатывает DataFrame с данными фраз и сохраняет их в ПЕРСОНАЛЬНУЮ БД ПОСТРОЧНО.
@@ -378,15 +437,14 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
         logger.error(f"Неожиданная ошибка: {e}\n{traceback.format_exc()}")
         return f"Ошибка: {str(e)}"
 
-# --- НОВАЯ ФУНКЦИЯ: Логика команды /searchads с персональными таблицами ---
-# ИМИТИРУЕТ работу браузера при запросах к search.wb.ru
+# --- ОБНОВЛЕННАЯ ФУНКЦИЯ: Логика команды /searchads с Playwright ---
 def search_ads_task(chat_id):
     """
     Фоновая задача для выполнения поисковых запросов и обновления данных в ПЕРСОНАЛЬНОЙ БД.
-    ИМИТИРУЕТ работу браузера при запросах к search.wb.ru.
+    ИСПОЛЬЗУЕТ Playwright для имитации работы браузера.
     """
     logger.info(f"Запуск задачи search_ads для пользователя chat_id: {chat_id}")
-    send_message(chat_id, f"Начинаю выполнение /searchads. Это может занять некоторое время...")
+    send_message(chat_id, f"Начинаю выполнение /searchads с использованием браузера. Это может занять значительно больше времени...")
 
     try:
         PhraseModel = get_personal_phrase_model(chat_id)
@@ -399,34 +457,36 @@ def search_ads_task(chat_id):
                 send_message(chat_id, "В вашей персональной таблице phrases нет данных для обработки.")
                 return
 
-            # --- ИЗМЕНЕНО: Обновлен URL и параметры запроса ---
-            base_url = "https://search.wb.ru/exactmatch/ru/common/v14/search"
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
             updated_count = 0
             errors = []
 
-            # --- ИЗМЕНЕНО: Используем сессию requests.Session для имитации браузера ---
-            with requests.Session() as session:
-                # Устанавливаем базовые заголовки для всей сессии, как у браузера
-                session.headers.update({
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache',
-                    'Sec-Ch-Ua': '"Chromium";v="118", "Google Chrome";v="118", "Not=A?Brand";v="99"',
-                    'Sec-Ch-Ua-Mobile': '?0',
-                    'Sec-Ch-Ua-Platform': '"Windows"',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Upgrade-Insecure-Requests': '1',
-                    # Referer будет устанавливаться для каждого запроса
-                    # User-Agent будет выбираться случайно для каждого запроса
+            # --- ИЗМЕНЕНО: Используем Playwright ---
+            logger.info("Запускаю Playwright...")
+            with sync_playwright() as p:
+                # Запускаем браузер (headless=True для работы на сервере)
+                browser = p.chromium.launch(headless=True) 
+                logger.info("Браузер запущен.")
+                
+                # Создаем новую страницу
+                page = browser.new_page()
+                logger.info("Новая страница создана.")
+                
+                # Устанавливаем базовые заголовки для имитации браузера
+                page.set_extra_http_headers({
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                    "Sec-Ch-Ua": '"Chromium";v="118", "Google Chrome";v="118", "Not=A?Brand";v="99"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
                 })
-
+                
                 for i, phrase_obj in enumerate(phrases):
                     phrase_text = phrase_obj.phrase
                     logger.debug(f"[{i+1}/{len(phrases)}] Обрабатываем фразу: '{phrase_text}' для пользователя {chat_id}")
@@ -434,24 +494,6 @@ def search_ads_task(chat_id):
                     if (i + 1) % 100 == 0:
                         send_message(chat_id, f"Обработано {i+1} из {len(phrases)} фраз...")
 
-                    # --- ИЗМЕНЕНО: Параметры запроса для имитации браузера ---
-                    params = {
-                        "ab_testing": "false",
-                        "appType": "1", # Веб-версия
-                        "curr": "rub",
-                        "dest": "-1257786", # Немного измененный dest
-                        "lang": "ru",
-                        "page": "1",
-                        "query": phrase_text, # Добавляем query прямо в params
-                        "resultset": "catalog",
-                        "sort": "popular",
-                        "spp": "20", # Изменено с 99 на 20
-                        "suppressSpellcheck": "false",
-                        "uclusters": "1", # Изменено с 0 на 1
-                    }
-                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-                    # --- ИЗМЕНЕНО: Улучшенная логика повторов с экспоненциальной задержкой и отдельной обработкой сетевых ошибок ---
                     max_total_retries = 5
                     max_preset_retries = 3
                     max_network_retries = 5
@@ -466,40 +508,20 @@ def search_ads_task(chat_id):
                            preset_retries < max_preset_retries or \
                            network_retries < max_network_retries):
                         try:
-                            # --- ИЗМЕНЕНО: Реалистичная задержка и заголовки ---
-                            # Базовая задержка от 5 до 15 секунд, больше похоже на человека
+                            # --- ИЗМЕНЕНО: Реалистичная задержка перед каждым "запросом" ---
                             base_delay = random.uniform(5, 15)
-                            
-                            # Если была сетевая ошибка, увеличиваем задержку
-                            if network_retries > 0:
-                                # Задержка от 15 до 30 секунд при сетевых ошибках
-                                network_delay = random.uniform(15, 30)
-                                logger.info(f"Повторная попытка после сетевой ошибки ({network_retries}/{max_network_retries}) через {network_delay:.2f} секунд...")
-                                time.sleep(network_delay)
-                            else:
-                                logger.debug(f"Пауза {base_delay:.2f} секунд перед запросом для '{phrase_text}'...")
-                                time.sleep(base_delay)
-
-                            # Обновляем заголовки для каждого запроса
-                            headers = {
-                                'User-Agent': random.choice(POPULAR_USER_AGENTS),
-                                # Используем quote_plus для правильного кодирования URL
-                                'Referer': f'https://www.wildberries.ru/catalog/?search={quote_plus(phrase_text)}'
-                            }
+                            logger.debug(f"Пауза {base_delay:.2f} секунд перед обработкой '{phrase_text}'...")
+                            time.sleep(base_delay)
                             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-                            # --- ИЗМЕНЕНО: Используем сессию и обновленные параметры/заголовки ---
-                            response = session.get(
-                                base_url, 
-                                params=params,
-                                timeout=20, # Увеличен таймаут
-                                headers=headers
-                            )
+                            # --- ИЗМЕНЕНО: Вызов функции поиска через Playwright ---
+                            response_data = search_single_phrase(page, phrase_text, chat_id)
                             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                             
-                            response.raise_for_status()
-                            response_data = response.json()
-
+                            # --- ИЗМЕНЕНО: Проверка данных из JSON-ответа ---
+                            if not isinstance(response_data, dict):
+                                 raise ValueError("Ответ не является словарем JSON.")
+                            
                             metadata = response_data.get("metadata", {})
                             total = response_data.get("total", 0)
                             preset = metadata.get("presetId", 0)
@@ -519,50 +541,33 @@ def search_ads_task(chat_id):
                             success = True
                             network_retries = 0 # Сбрасываем при успехе
 
-                        # --- ИЗМЕНЕНО: Улучшенная обработка сетевых ошибок ---
-                        except requests.exceptions.ProxyError as e:
+                        # --- ИЗМЕНЕНО: Обработка ошибок Playwright ---
+                        except TimeoutError as e:
                             network_retries += 1
-                            logger.error(f"Сетевая ошибка (ProxyError) для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                            errors.append(f"Фраза '{phrase_text}': Сетевая ошибка (ProxyError) - {e}")
+                            logger.error(f"Таймаут при обработке фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Таймаут - {e}")
                             if network_retries >= max_network_retries:
-                                 logger.error(f"Достигнуто максимальное количество сетевых повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
-                                 errors.append(f"Фраза '{phrase_text}': Прекращено из-за сетевых ошибок после {max_network_retries} попыток.")
-                                 break
-                                
-                        except requests.exceptions.ConnectionError as e:
-                            network_retries += 1
-                            logger.error(f"Ошибка подключения для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                            errors.append(f"Фраза '{phrase_text}': Ошибка подключения - {e}")
-                            if network_retries >= max_network_retries:
-                                 logger.error(f"Достигнуто максимальное количество сетевых повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
-                                 errors.append(f"Фраза '{phrase_text}': Прекращено из-за ошибок подключения после {max_network_retries} попыток.")
-                                 break
-                                
-                        except requests.exceptions.Timeout as e:
-                            network_retries += 1
-                            logger.error(f"Таймаут запроса для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                            errors.append(f"Фраза '{phrase_text}': Таймаут запроса - {e}")
-                            if network_retries >= max_network_retries:
-                                 logger.error(f"Достигнуто максимальное количество сетевых повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
+                                 logger.error(f"Достигнуто максимальное количество повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
                                  errors.append(f"Фраза '{phrase_text}': Прекращено из-за таймаутов после {max_network_retries} попыток.")
                                  break
-                                
-                        except requests.exceptions.RequestException as e:
-                            logger.error(f"Ошибка запроса для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                            errors.append(f"Фраза '{phrase_text}': Ошибка запроса - {e}")
-                            break # Прерываем попытки для других RequestException
-                            
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Ошибка парсинга JSON для фразы '{phrase_text}' пользователя {chat_id}: {e}")
-                            errors.append(f"Фраза '{phrase_text}': Ошибка парсинга JSON - {e}")
-                            break # Не повторяем при JSON ошибках
-                            
-                        except Exception as e:
-                            logger.error(f"Неожиданная ошибка для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                        except Error as e: # Общая ошибка Playwright
+                            network_retries += 1
+                            logger.error(f"Ошибка Playwright при обработке фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Ошибка браузера - {e}")
+                            if network_retries >= max_network_retries:
+                                 logger.error(f"Достигнуто максимальное количество повторов ({max_network_retries}) для фразы '{phrase_text}'. Прекращаю попытки.")
+                                 errors.append(f"Фраза '{phrase_text}': Прекращено из-за ошибок браузера после {max_network_retries} попыток.")
+                                 break
+                        except ValueError as e: # Ошибки парсинга или логики
+                            logger.error(f"Ошибка обработки данных для фразы '{phrase_text}' пользователя {chat_id}: {e}")
+                            errors.append(f"Фраза '{phrase_text}': Ошибка данных - {e}")
+                            break # Не повторяем при ошибках данных
+                        except Exception as e: # Прочие ошибки
+                            logger.error(f"Неожиданная ошибка при обработке фразы '{phrase_text}' пользователя {chat_id}: {e}")
                             errors.append(f"Фраза '{phrase_text}': Неожиданная ошибка - {e}")
                             break # Не повторяем при прочих ошибках
-                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                    
                     if not success:
                         logger.warning(f"Не удалось получить корректные данные для фразы '{phrase_text}' пользователя {chat_id} после повторов.")
                         errors.append(f"Фраза '{phrase_text}': Не удалось получить данные после повторов.")
@@ -611,6 +616,11 @@ def search_ads_task(chat_id):
                         logger.error(f"Ошибка обработки/обновления данных для фразы '{phrase_text}' пользователя {chat_id}: {e}")
                         errors.append(f"Фраза '{phrase_text}': Ошибка обработки данных - {e}")
                         db.session.rollback()
+
+                # --- Закрываем браузер после обработки всех фраз ---
+                browser.close()
+                logger.info("Браузер закрыт.")
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             # --- Финальный отчет остается без изменений ---
             final_message_lines = [f"✅ Задача /searchads завершена для пользователя {chat_id}."]
@@ -671,7 +681,7 @@ def webhook():
 
     # ИСПРАВЛЕНО: Полное и корректное условие проверки JSON-данных
     json_data = request.get_json()
-    if not json_data: # Проверяем, что json_data не None и не пустой
+    if not json_ # Проверяем, что json_data не None и не пустой
         logger.warning("Получен не JSON запрос или пустое тело")
         return "OK"
 
@@ -726,9 +736,11 @@ def webhook():
                 send_message(chat_id, "Пожалуйста, отправьте ZIP файл с XLSX аналитики поиска.")
 
             elif text == "/searchads":
+                # --- ИЗМЕНЕНО: Запуск задачи через Playwright ---
                 thread = threading.Thread(target=search_ads_task, args=(chat_id,))
                 thread.start()
-                send_message(chat_id, "Команда /searchads принята. Задача запущена в фоновом режиме. Результаты будут отправлены по мере обработки.")
+                send_message(chat_id, "Команда /searchads принята. Задача запущена в фоновом режиме с использованием браузера. Результаты будут отправлены по мере обработки.")
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             # --- НОВАЯ КОМАНДА ---
             elif text == "/clearwords":
