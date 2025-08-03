@@ -511,15 +511,15 @@ def search_ads_task(chat_id):
         send_message(chat_id, f"❌ Критическая ошибка в задаче /searchads: {e}")
 
 
-# --- Telegram Webhook ---
+# --- Telegram Webhook (исправленный фрагмент) ---
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     """Обработчик вебхука Telegram."""
     initialize_database_if_needed()
 
-    # ИСПРАВЛЕНО: Полное условие проверки JSON-данных
+    # ИСПРАВЛЕНО: Полное и корректное условие проверки JSON-данных
     json_data = request.get_json()
-    if not json_
+    if not json_data: # Проверяем, что json_data не None и не пустой
         logger.warning("Получен не JSON запрос или пустое тело")
         return "OK"
 
@@ -531,6 +531,9 @@ def webhook():
     if not chat_id:
         logger.warning("Не удалось получить chat_id")
         return "OK"
+
+    # ... (остальной код функции webhook остается без изменений) ...
+    # --- Конец исправленного фрагмента ---
 
     try:
         if "text" in message:
