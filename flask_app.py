@@ -39,6 +39,20 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     logger.warning("Переменная окружения TELEGRAM_TOKEN не установлена!")
 
+# --- Список популярных User-Agent'ов ---
+POPULAR_USER_AGENTS = [
+    # Chrome on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+    # Safari on macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
+    # Chrome on macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
+    # Chrome on Linux
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    # Edge on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36 Edg/117.0.2045.47"
+]
+
 # --- Модели БД ---
 # Базовая модель пользователя - общая для всех
 class User(db.Model):
@@ -283,9 +297,10 @@ def process_phrases_from_xlsx(df, chat_id):
 
                     db.session.commit()
                     
-#                    if is_new:
-#                         message_text = f"Новая фраза:\nФраза: {phrase}\nЗапросов в день: {qntyPerDay}\nПредмет: {subject}"
-#                         send_message(chat_id, message_text)
+                    # --- ИЗМЕНЕНО: Отправка уведомления о новой фразе отключена ---
+                    # if is_new:
+                    #      message_text = f"Новая фраза:\nФраза: {phrase}\nЗапросов в день: {qntyPerDay}\nПредмет: {subject}"
+                    #      send_message(chat_id, message_text)
 
                 except (ValueError, TypeError) as row_e:
                     logger.error(f"[{processed_count}/{total_rows}] Ошибка обработки строки {index} для пользователя {chat_id}: {row_e}")
@@ -417,7 +432,13 @@ def search_ads_task(chat_id):
                         logger.debug(f"Пауза {delay:.2f} секунд перед запросом для '{phrase_text}'...")
                         time.sleep(delay)
 
-                        response = requests.get(base_url, params=params, timeout=15)
+                        # --- ИЗМЕНЕНО: Добавлен случайный User-Agent ---
+                        headers = {
+                            'User-Agent': random.choice(POPULAR_USER_AGENTS)
+                        }
+                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+                        response = requests.get(base_url, params=params, timeout=15, headers=headers) # Добавлен headers
                         response.raise_for_status()
                         response_data = response.json()
 
