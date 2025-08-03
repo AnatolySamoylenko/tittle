@@ -15,9 +15,9 @@ app = Flask(__name__)
 
 # --- Конфигурация ---
 # Убедитесь, что путь корректный и доступен для записи
-DB_PATH = os.path.join(os.path.expanduser('~'), 'tittle_database.db')
+# Используем путь, совместимый с PythonAnywhere
+DB_PATH = '/home/AnatolySamoylenko/tittle_database.db'
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_PATH}'
-# Отключаем отслеживание изменений моделей для экономии ресурсов
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
@@ -80,81 +80,114 @@ def send_message(chat_id, text):
     except requests.exceptions.RequestException as e:
         app.logger.error(f"Ошибка отправки сообщения пользователю {chat_id}: {e}")
 
-# --- Основная логика обработки файлов ---
 def extract_dates_from_filename_simple(filename):
     """Простое извлечение дат для логирования. Не используется в БД."""
-    # Упрощенное регулярное выражение
     pattern = r'[сcCc][\s_\-\.]*([\d\-\./]+)[\s_\-\.]*[пnN][оoO][\s_\-\.]*([\d\-\./]+)'
     match = re.search(pattern, filename)
     if match:
         return match.group(1), match.group(2)
     return None, None
 
+# --- ИСПРАВЛЕННАЯ Основная логика обработки файлов ---
 def process_phrases_from_xlsx(df, chat_id):
     """
     Обрабатывает DataFrame с данными фраз и сохраняет их в БД.
+    Использует колонки: 0 (Поисковый запрос), 3 (Запросов в среднем за день), 5 (Больше всего заказов в предмете).
     Отправляет новые фразы в Telegram.
     """
-    required_columns = {
-        'phrase_col': None,
-        'qnty_col': None,
-        'subject_col': None
+    print(f"Начинаем обработку DataFrame. Колонки: {list(df.columns)}")
+    print(f"Форма DataFrame: {df.shape}")
+
+    # ЯВНО указываем индексы нужных колонок (0-based)
+    # 1 колонка = индекс 0 = 'Поисковый запрос'
+    # 4 колонка = индекс 3 = 'Запросов в среднем за день'
+    # 6 колонка = индекс 5 = 'Больше всего заказов в предмете'
+    required_indices = {
+        'phrase_col_idx': 0,
+        'qnty_col_idx': 3,
+        'subject_col_idx': 5
     }
 
-    # Поиск колонок по названию
-    for col in df.columns:
-        col_clean = str(col).strip().lower()
-        if 'поисковый запрос' in col_clean:
-            required_columns['phrase_col'] = col
-        elif 'количество запросов' in col_clean and 'среднем' not in col_clean:
-            required_columns['qnty_col'] = col
-        elif 'больше всего заказов' in col_clean:
-            required_columns['subject_col'] = col
+    # Проверка наличия необходимых колонок по индексу
+    max_required_idx = max(required_indices.values())
+    if max_required_idx >= len(df.columns):
+        error_msg = (
+            f"Файл не содержит достаточно колонок. "
+            f"Требуется как минимум {max_required_idx + 1} колонок (индексы 0 до {max_required_idx}). "
+            f"Найдено {len(df.columns)} колонок."
+        )
+        raise ValueError(error_msg)
 
-    # Проверка наличия всех необходимых колонок
-    if None in required_columns.values():
-        missing = [k for k, v in required_columns.items() if v is None]
-        raise ValueError(f"Не найдены колонки: {missing}")
+    # Проверка, что колонки не пустые (по названию или содержимому)
+    print(f"Используемые индексы: {required_indices}")
+    print(f"Названия используемых колонок: "
+          f"0:'{df.columns[0] if len(df.columns) > 0 else 'N/A'}', "
+          f"3:'{df.columns[3] if len(df.columns) > 3 else 'N/A'}', "
+          f"5:'{df.columns[5] if len(df.columns) > 5 else 'N/A'}'")
 
-    # Выбор и очистка нужных данных
-    data_slice = df[list(required_columns.values())].copy()
+    # Выбор нужных колонок по индексу
+    data_slice = df.iloc[:, [required_indices['phrase_col_idx'], 
+                             required_indices['qnty_col_idx'], 
+                             required_indices['subject_col_idx']]].copy()
+    
+    # Присваиваем осмысленные имена колонкам для дальнейшей обработки
     data_slice.columns = ['phrase_raw', 'qntyPerDay_raw', 'subject_raw']
 
+    print(f"Форма data_slice до очистки: {data_slice.shape}")
+    if not data_slice.empty:
+         print(f"Примеры данных до очистки (первые 2 строки):\n{data_slice.head(2)}")
+
     # Очистка и преобразование данных
+    # 1. Phrase
     data_slice['phrase'] = data_slice['phrase_raw'].astype(str).str.strip()
+    initial_count = len(data_slice)
     data_slice = data_slice[data_slice['phrase'] != '']
+    after_phrase_filter = len(data_slice)
+    print(f"Строк после фильтрации пустых phrase: {after_phrase_filter} (удалено {initial_count - after_phrase_filter})")
+
+    # 2. QntyPerDay - используем 'Запросов в среднем за день' (колонка 3)
+    # Преобразуем в число, заменяем ошибки на 0, затем в int
     data_slice['qntyPerDay'] = pd.to_numeric(data_slice['qntyPerDay_raw'], errors='coerce').fillna(0).astype(int)
+    
+    # 3. Subject
     data_slice['subject'] = data_slice['subject_raw'].astype(str).str.strip()
 
     # Удаление промежуточных колонок
-    data_slice.drop(columns=['phrase_raw', 'qntyPerDay_raw', 'subject_raw'], inplace=True)
+    final_data = data_slice.drop(columns=['phrase_raw', 'qntyPerDay_raw', 'subject_raw'])
 
-    if data_slice.empty:
+    print(f"Форма final_data после очистки: {final_data.shape}")
+    if not final_data.empty:
+        print(f"Примеры данных после очистки (первые 2 строки):\n{final_data.head(2)}")
+
+    if final_data.empty:
         raise ValueError("Нет данных для импорта после очистки.")
 
     phrases_added = 0
     phrases_updated = 0
-    new_phrases_info = [] # Для сбора информации о новых фразах
+    new_phrases_info = []
 
     with app.app_context():
         try:
-            # Обработка каждой строки
             phrases_to_merge = []
-            for _, row in data_slice.iterrows():
+            processed_count = 0
+            for _, row in final_data.iterrows():
+                processed_count += 1
                 phrase_text = row['phrase']
+
                 # Проверяем существование фразы
                 existing_phrase = db.session.get(Phrase, phrase_text)
 
                 if existing_phrase:
                     phrases_updated += 1
+                    print(f"[{processed_count}] Обновляем существующую фразу: {phrase_text}")
                 else:
                     phrases_added += 1
-                    # Собираем информацию о новой фразе
                     new_phrases_info.append({
                         'phrase': phrase_text,
                         'qntyPerDay': row['qntyPerDay'],
                         'subject': row['subject']
                     })
+                    print(f"[{processed_count}] Найдена новая фраза: {phrase_text}")
 
                 # Создаем объект для merge
                 phrase_obj = Phrase(
@@ -165,16 +198,21 @@ def process_phrases_from_xlsx(df, chat_id):
                 phrases_to_merge.append(phrase_obj)
 
             # Массовое обновление/вставка
+            print(f"Выполняем merge для {len(phrases_to_merge)} записей...")
             for obj in phrases_to_merge:
                 db.session.merge(obj)
             db.session.commit()
+            print("Данные успешно сохранены в БД.")
 
-            # Отправка информации о новых фразах
+            # Отправка информации о новых фразах (пакетами)
             if new_phrases_info:
-                # Отправляем сообщения пакетами по 10, чтобы не перегружать Telegram
-                for i in range(0, len(new_phrases_info), 10):
-                    batch = new_phrases_info[i:i+10]
-                    message_lines = [f"Найдено {len(new_phrases_info)} новых фраз:"]
+                print(f"Отправляем информацию о {len(new_phrases_info)} новых фразах...")
+                # Отправляем первые 50 новых фраз, чтобы не перегружать Telegram
+                info_to_send = new_phrases_info[:50] 
+                for i in range(0, len(info_to_send), 10):
+                    batch = info_to_send[i:i+10]
+                    # Создаем одно сообщение для каждой партии
+                    message_lines = [f"Найдены новые фразы ({len(new_phrases_info)} всего, показаны первые {len(info_to_send)}):"]
                     for info in batch:
                         message_lines.append(
                             f"Фраза: {info['phrase']}\n"
@@ -183,13 +221,17 @@ def process_phrases_from_xlsx(df, chat_id):
                             f"---"
                         )
                     send_message(chat_id, "\n".join(message_lines))
+                
+                if len(new_phrases_info) > 50:
+                     send_message(chat_id, f"... и еще {len(new_phrases_info) - 50} фраз.")
 
         except Exception as e:
             db.session.rollback()
             app.logger.error(f"Ошибка БД при обработке фраз: {e}")
-            raise
+            raise # Повторно вызываем исключение, чтобы оно передалось вверх
 
-    return phrases_added, phrases_updated, len(data_slice)
+    return phrases_added, phrases_updated, len(final_data)
+
 
 def process_zip_and_xlsx(zip_content, original_filename, chat_id):
     """
@@ -251,6 +293,7 @@ def process_zip_and_xlsx(zip_content, original_filename, chat_id):
     except Exception as e:
         app.logger.error(f"Неожиданная ошибка: {e}\n{traceback.format_exc()}")
         return f"Ошибка: {str(e)}"
+
 
 # --- Telegram Webhook ---
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
