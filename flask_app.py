@@ -10,7 +10,7 @@ import requests
 import pandas as pd
 from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect, text, MetaData, Table
+from sqlalchemy import inspect, text, MetaData
 from sqlalchemy.exc import OperationalError
 
 # --- Настройка логирования ---
@@ -32,7 +32,7 @@ _tables_exist_cache = {}
 _user_shop_cache = {}
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-if not TEGRAM_TOKEN:
+if not TELEGRAM_TOKEN:
     logger.warning("Переменная окружения TELEGRAM_TOKEN не установлена!")
 
 # --- Модели БД ---
@@ -333,8 +333,9 @@ def webhook():
     """Обработчик вебхука Telegram."""
     initialize_database_if_needed()
     
+    # ИСПРАВЛЕНО: Полное условие проверки JSON-данных
     json_data = request.get_json()
-    if not json_
+    if not json_data: # Проверяем, что json_data не None и не пустой словарь/список
         logger.warning("Получен не JSON запрос или пустое тело")
         return "OK"
 
