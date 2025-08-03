@@ -89,36 +89,41 @@ def webhook():
         text = message.get("text", "")
         username = message.get("from", {}).get("username", "Неизвестный")
         
-        # Проверяем наличие записи в shops для этого chat_id
-        shop_exists = check_shop_exists_for_chat(chat_id)
-        
-        # Если записи нет - уведомляем пользователя
-        if not shop_exists:
-            send_message(chat_id, "У вас нет зарегистрированных магазинов.")
-        
         if text == "/start":
-            if shop_exists:
-                send_message(chat_id, "Привет, это я бот! У вас есть зарегистрированный магазин.")
-            else:
-                send_message(chat_id, "Привет, это я бот! У вас пока нет зарегистрированных магазинов.")
+            # Проверяем наличие записи в shops для этого chat_id
+            shop_exists = check_shop_exists_for_chat(chat_id)
             
-            # Сохраняем нового пользователя в БД
+            # Проверяем, есть ли пользователь в базе
             with app.app_context():
                 user = User.query.filter_by(chat_id=str(chat_id)).first()
-                if not user:
+                
+                if user:
+                    # Пользователь есть в базе
+                    if shop_exists:
+                        send_message(chat_id, "Привет! Вы есть в базе и у вас есть зарегистрированный магазин.")
+                    else:
+                        send_message(chat_id, "Привет! Вы есть в базе, но у вас нет зарегистрированных магазинов.")
+                else:
+                    # Пользователя нет в базе - добавляем его
                     user = User(chat_id=str(chat_id), username=username)
                     try:
                         db.session.add(user)
                         db.session.commit()
                         print(f"Пользователь {username} ({chat_id}) добавлен в БД.")
+                        
+                        # Уведомляем о регистрации и проверяем магазин
+                        if shop_exists:
+                            send_message(chat_id, "Привет! Вы зарегистрированы в базе и у вас есть зарегистрированный магазин.")
+                        else:
+                            send_message(chat_id, "Привет! Вы зарегистрированы в базе, но у вас нет зарегистрированных магазинов.")
                     except Exception as e:
                         db.session.rollback()
                         print(f"Ошибка при добавлении пользователя: {e}")
+                        send_message(chat_id, "Произошла ошибка при регистрации. Попробуйте позже.")
         
         elif text:
-            if shop_exists:
-                send_message(chat_id, f"Привет, @{username}! Вы написали: {text}")
-            # Если магазина нет, сообщение уже отправлено выше
+            # Обработка обычных сообщений (по желанию)
+            send_message(chat_id, f"Вы написали: {text}")
     
     return "ok"
 
