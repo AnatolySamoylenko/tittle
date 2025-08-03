@@ -283,9 +283,9 @@ def process_phrases_from_xlsx(df, chat_id):
 
                     db.session.commit()
                     
-                    if is_new:
-                         message_text = f"Новая фраза:\nФраза: {phrase}\nЗапросов в день: {qntyPerDay}\nПредмет: {subject}"
-                         send_message(chat_id, message_text)
+#                    if is_new:
+#                         message_text = f"Новая фраза:\nФраза: {phrase}\nЗапросов в день: {qntyPerDay}\nПредмет: {subject}"
+#                         send_message(chat_id, message_text)
 
                 except (ValueError, TypeError) as row_e:
                     logger.error(f"[{processed_count}/{total_rows}] Ошибка обработки строки {index} для пользователя {chat_id}: {row_e}")
