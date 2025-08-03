@@ -65,7 +65,8 @@ def send_message(chat_id, text):
 def webhook():
     data = request.get_json()
     
-    if "message" in 
+    # ИСПРАВЛЕНО: Завершена неполная строка
+    if "message" in data:
         message = data["message"]
         chat_id = message["chat"]["id"]
         text = message.get("text", "")
