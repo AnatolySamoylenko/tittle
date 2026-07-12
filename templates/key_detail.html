@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+
+{% block title %}Информация о ключе{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="bi bi-key"></i> {{ info.key_info.name }}</h2>
+    <div>
+        <button onclick="checkKey()" class="btn btn-outline-primary me-2">
+            <i class="bi bi-arrow-repeat"></i> Проверить
+        </button>
+        <a href="{{ url_for('keys_list') }}" class="btn btn-secondary">
+            <i class="bi bi-arrow-left"></i> Назад
+        </a>
+    </div>
+</div>
+
+<div class="row g-4">
+    <!-- Основная информация -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-info-circle"></i> Информация о ключе
+            </div>
+            <div class="card-body">
+                <table class="table table-borderless">
+                    <tr>
+                        <td><strong>Название:</strong></td>
+                        <td>{{ info.key_info.name }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Описание:</strong></td>
+                        <td>{{ info.key_info.description or '—' }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Тип токена:</strong></td>
+                        <td><span class="token-type {{ info.key_info.token_type }}">{{ info.key_info.token_type }}</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Создан:</strong></td>
+                        <td>{{ info.key_info.created_at }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Последняя проверка:</strong></td>
+                        <td>{{ info.key_info.last_checked or '—' }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Статус:</strong></td>
+                        <td>
+                            <span class="status-badge {% if info.key_info.is_active %}status-success{% else %}status-error{% endif %}">
+                                {{ 'Активен' if info.key_info.is_active else 'Неактивен' }}
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Информация о продавце -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-building"></i> Информация о продавце
+            </div>
+            <div class="card-body">
+                {% if info.seller_info and 'error' not in info.seller_info %}
+                <table class="table table-borderless">
+                    <tr>
+                        <td><strong>Название:</strong></td>
+                        <td>{{ info.seller_info.name or '—' }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>ID продавца:</strong></td>
+                        <td><code>{{ info.seller_info.sid or '—' }}</code></td>
+                    </tr>
+                    <tr>
+                        <td><strong>ИНН:</strong></td>
+                        <td>{{ info.seller_info.tin or '—' }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Торговое наименование:</strong></td>
+                        <td>{{ info.seller_info.tradeMark or '—' }}</td>
+                    </tr>
+                </table>
+                {% else %}
+                <p class="text-muted">Информация о продавце недоступна</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Доступные категории -->
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-grid"></i> Доступные категории API
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    {% for category, info in info.categories_status.items() %}
+                    <div class="col-md-3 col-sm-6 mb-3">
+                        <div class="p-3 border rounded {% if info.status == 'success' %}border-success bg-success bg-opacity-10{% else %}border-danger bg-danger bg-opacity-10{% endif %}">
+                            <h6>{{ category }}</h6>
+                            <span class="status-badge {% if info.status == 'success' %}status-success{% else %}status-error{% endif %}">
+                                {{ '✅ Доступен' if info.status == 'success' else '❌ Недоступен' }}
+                            </span>
+                            {% if info.response_time %}
+                            <small class="text-muted d-block mt-1">⏱ {{ info.response_time }}с</small>
+                            {% endif %}
+                            {% if info.detail and info.detail != 'OK' %}
+                            <small class="text-danger d-block mt-1">{{ info.detail }}</small>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Логи -->
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-clock-history"></i> Последние запросы
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Время</th>
+                                <th>Метод</th>
+                                <th>Endpoint</th>
+                                <th>Статус</th>
+                                <th>Время ответа</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for log in info.logs %}
+                            <tr>
+                                <td>{{ log.created_at }}</td>
+                                <td><span class="badge bg-secondary">{{ log.method }}</span></td>
+                                <td><code>{{ log.endpoint }}</code></td>
+                                <td>
+                                    <span class="status-badge {% if log.status_code == 200 %}status-success{% else %}status-error{% endif %}">
+                                        {{ log.status_code }}
+                                    </span>
+                                </td>
+                                <td>{{ log.response_time or '—' }}с</td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="5" class="text-center text-muted py-3">Нет записей</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function checkKey() {
+    const btn = event.target.closest('button');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Проверка...';
+    
+    fetch('{{ url_for("check_key", key_id=info.key_info.id) }}', {
+        method: 'POST'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert('✅ ' + data.message);
+        } else {
+            alert('❌ ' + data.message);
+        }
+        location.reload();
+    })
+    .catch(error => {
+        alert('Ошибка при проверке');
+        location.reload();
+    });
+}
+</script>
+{% endblock %}

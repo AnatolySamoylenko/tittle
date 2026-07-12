@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Управление Wildberries API - {% block title %}Главная{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        .sidebar {
+            min-height: 100vh;
+            background: #2c3e50;
+            padding: 20px 0;
+        }
+        .sidebar .nav-link {
+            color: #ecf0f1;
+            padding: 12px 24px;
+            border-radius: 8px;
+            margin: 4px 12px;
+            transition: all 0.3s;
+        }
+        .sidebar .nav-link:hover {
+            background: #34495e;
+        }
+        .sidebar .nav-link.active {
+            background: #3498db;
+        }
+        .sidebar .nav-link i {
+            margin-right: 12px;
+            width: 24px;
+            text-align: center;
+        }
+        .main-content {
+            padding: 30px;
+            background: #f8f9fa;
+            min-height: 100vh;
+        }
+        .card {
+            border: none;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-radius: 12px;
+        }
+        .card-header {
+            background: white;
+            border-bottom: 2px solid #f0f0f0;
+            font-weight: 600;
+            border-radius: 12px 12px 0 0 !important;
+        }
+        .status-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-success { background: #d4edda; color: #155724; }
+        .status-error { background: #f8d7da; color: #721c24; }
+        .status-warning { background: #fff3cd; color: #856404; }
+        .flash-messages {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            max-width: 400px;
+        }
+        .flash-messages .alert {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        .key-card {
+            transition: transform 0.2s;
+        }
+        .key-card:hover {
+            transform: translateY(-5px);
+        }
+        .token-type {
+            font-size: 11px;
+            padding: 2px 10px;
+            border-radius: 12px;
+            background: #e9ecef;
+        }
+        .token-type.personal { background: #cce5ff; color: #004085; }
+        .token-type.service { background: #d4edda; color: #155724; }
+        .token-type.base { background: #fff3cd; color: #856404; }
+        .token-type.test { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <div class="col-md-3 col-lg-2 p-0 sidebar">
+                <div class="text-center text-white py-4">
+                    <h5><i class="bi bi-box"></i> WB Manager</h5>
+                    <small class="text-muted">Управление API</small>
+                </div>
+                <nav class="nav flex-column">
+                    <a class="nav-link {% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index') }}">
+                        <i class="bi bi-house"></i> Главная
+                    </a>
+                    <a class="nav-link {% if request.endpoint == 'keys_list' or request.endpoint == 'add_key' %}active{% endif %}" href="{{ url_for('keys_list') }}">
+                        <i class="bi bi-key"></i> Настройки
+                    </a>
+                    <a class="nav-link {% if request.endpoint == 'advertising' %}active{% endif %}" href="{{ url_for('advertising') }}">
+                        <i class="bi bi-megaphone"></i> Управление рекламой
+                    </a>
+                    <a class="nav-link {% if request.endpoint == 'products' %}active{% endif %}" href="{{ url_for('products') }}">
+                        <i class="bi bi-box-seam"></i> Управление товарами
+                    </a>
+                </nav>
+            </div>
+            
+            <!-- Main Content -->
+            <div class="col-md-9 col-lg-10 main-content">
+                <!-- Flash Messages -->
+                <div class="flash-messages">
+                    {% with messages = get_flashed_messages(with_categories=true) %}
+                        {% if messages %}
+                            {% for category, message in messages %}
+                                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                                    {{ message }}
+                                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                                </div>
+                            {% endfor %}
+                        {% endif %}
+                    {% endwith %}
+                </div>
+                
+                <!-- Content -->
+                {% block content %}{% endblock %}
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Автоматическое скрытие flash-сообщений через 5 секунд
+        setTimeout(() => {
+            document.querySelectorAll('.alert').forEach(el => {
+                const alert = new bootstrap.Alert(el);
+                alert.close();
+            });
+        }, 5000);
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
