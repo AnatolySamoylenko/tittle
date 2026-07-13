@@ -3,12 +3,171 @@
 {% block title %}Управление товарами{% endblock %}
 
 {% block content %}
-<div class="text-center py-5">
-    <i class="bi bi-box-seam fs-1 text-warning"></i>
-    <h3 class="mt-3">Управление товарами</h3>
-    <p class="text-muted">Раздел в разработке</p>
-    <div class="alert alert-info d-inline-block">
-        <i class="bi bi-info-circle"></i> Здесь будет управление товарами, ценами и остатками
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h2><i class="bi bi-box-seam"></i> Управление товарами</h2>
+        <small class="text-muted">
+            Ключ: {{ key_name }} 
+            {% if last_update %}
+            | Обновлено: {{ last_update.strftime('%d.%m.%Y %H:%M') }}
+            {% endif %}
+        </small>
+    </div>
+    <div>
+        <a href="{{ url_for('selected_products') }}?key_id={{ key_id }}" class="btn btn-outline-success me-2">
+            <i class="bi bi-check2-square"></i> Отмеченные товары
+        </a>
+        <form method="POST" action="{{ url_for('update_products') }}" class="d-inline">
+            <input type="hidden" name="key_id" value="{{ key_id }}">
+            <button type="submit" class="btn btn-primary" onclick="this.innerHTML='<span class=\'spinner-border spinner-border-sm\'></span> Загрузка...'">
+                <i class="bi bi-arrow-repeat"></i> Получить список товаров
+            </button>
+        </form>
     </div>
 </div>
+
+<!-- Фильтры -->
+<div class="card mb-4">
+    <div class="card-body">
+        <form method="GET" action="{{ url_for('products') }}" class="row g-3">
+            <div class="col-md-2">
+                <input type="text" class="form-control" name="nm_id" placeholder="Артикул WB" value="{{ filters.nm_id }}">
+            </div>
+            <div class="col-md-2">
+                <input type="text" class="form-control" name="title" placeholder="Наименование" value="{{ filters.title }}">
+            </div>
+            <div class="col-md-2">
+                <input type="text" class="form-control" name="vendor_code" placeholder="Артикул продавца" value="{{ filters.vendor_code }}">
+            </div>
+            <div class="col-md-2">
+                <input type="text" class="form-control" name="brand" placeholder="Бренд" value="{{ filters.brand }}">
+            </div>
+            <div class="col-md-2">
+                <input type="text" class="form-control" name="category" placeholder="Категория" value="{{ filters.category }}">
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+                <button type="submit" class="btn btn-primary flex-grow-1">
+                    <i class="bi bi-search"></i> Фильтр
+                </button>
+                <a href="{{ url_for('products') }}" class="btn btn-outline-secondary">
+                    <i class="bi bi-x"></i>
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Таблица товаров -->
+<div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-list"></i> Всего товаров: {{ products|length }}</span>
+        <span class="text-muted small">
+            Отмечено: {{ selected_ids|length }}
+        </span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th style="width: 50px;">
+                            <input type="checkbox" id="selectAll" onclick="toggleAll()">
+                        </th>
+                        <th>Артикул WB</th>
+                        <th>Наименование</th>
+                        <th>Артикул продавца</th>
+                        <th>Бренд</th>
+                        <th>Категория</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for product in products %}
+                    <tr>
+                        <td>
+                            <input type="checkbox" class="product-checkbox" 
+                                   data-product-id="{{ product.id }}"
+                                   {% if product.id in selected_ids %}checked{% endif %}
+                                   onclick="toggleProduct({{ product.id }}, this)">
+                        </td>
+                        <td><code>{{ product.nm_id }}</code></td>
+                        <td>{{ product.title|truncate(50) }}</td>
+                        <td>{{ product.vendor_code or '—' }}</td>
+                        <td>{{ product.brand or '—' }}</td>
+                        <td>{{ product.category or '—' }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center text-muted py-4">
+                            <i class="bi bi-inbox fs-3 d-block"></i>
+                            Нет товаров. Нажмите "Получить список товаров" для загрузки.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Форма для отправки отметок -->
+<form id="toggleForm" method="POST" style="display:none;">
+    <input type="hidden" name="key_id" value="{{ key_id }}">
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleProduct(productId, checkbox) {
+    const form = document.getElementById('toggleForm');
+    form.action = `/products/toggle/${productId}`;
+    
+    // Показываем индикатор загрузки
+    checkbox.disabled = true;
+    checkbox.checked = !checkbox.checked;
+    
+    fetch(form.action, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+            'key_id': '{{ key_id }}'
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        checkbox.disabled = false;
+        if (!data.success) {
+            alert(data.message);
+            checkbox.checked = !checkbox.checked;
+        }
+        // Обновляем счётчик
+        updateCounter();
+    })
+    .catch(error => {
+        checkbox.disabled = false;
+        alert('Ошибка при сохранении');
+        checkbox.checked = !checkbox.checked;
+    });
+}
+
+function toggleAll() {
+    const selectAll = document.getElementById('selectAll');
+    const checkboxes = document.querySelectorAll('.product-checkbox');
+    checkboxes.forEach(cb => {
+        if (cb.checked !== selectAll.checked) {
+            cb.click();
+        }
+    });
+}
+
+function updateCounter() {
+    const checked = document.querySelectorAll('.product-checkbox:checked').length;
+    const total = document.querySelectorAll('.product-checkbox').length;
+    document.querySelector('.card-header .text-muted').textContent = `Отмечено: ${checked}`;
+}
+
+// Периодическое обновление счётчика
+setInterval(updateCounter, 5000);
+</script>
 {% endblock %}
