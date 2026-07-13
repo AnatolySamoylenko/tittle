@@ -58,13 +58,17 @@
 </div>
 
 <!-- Статус фоновой задачи -->
-{% if task_info %}
-<div class="alert alert-info mb-4">
+{% if task_info and task_info.status %}
+<div class="alert 
+    {% if task_info.status == 'completed' %}alert-success
+    {% elif task_info.status == 'running' %}alert-info
+    {% elif task_info.status == 'error' %}alert-danger
+    {% else %}alert-secondary{% endif %} mb-4">
     <div class="d-flex justify-content-between align-items-center">
         <div>
             <strong>Статус обновления:</strong> {{ task_info.message }}
-            {% if task_info.progress %}
-            <div class="progress mt-2" style="height: 20px; width: 300px;">
+            {% if task_info.progress is defined and task_info.progress < 100 %}
+            <div class="progress mt-2" style="height: 20px; max-width: 400px;">
                 <div class="progress-bar progress-bar-striped progress-bar-animated" 
                      role="progressbar" 
                      style="width: {{ task_info.progress }}%;" 
@@ -76,13 +80,15 @@
             </div>
             {% endif %}
         </div>
-        {% if task_info.status == 'completed' %}
-        <span class="badge bg-success">Готово</span>
-        {% elif task_info.status == 'running' %}
-        <span class="badge bg-primary">Выполняется</span>
-        {% elif task_info.status == 'error' %}
-        <span class="badge bg-danger">Ошибка</span>
-        {% endif %}
+        <div>
+            {% if task_info.status == 'completed' %}
+            <span class="badge bg-success fs-6">✅ Готово</span>
+            {% elif task_info.status == 'running' %}
+            <span class="badge bg-primary fs-6">⏳ Выполняется</span>
+            {% elif task_info.status == 'error' %}
+            <span class="badge bg-danger fs-6">❌ Ошибка</span>
+            {% endif %}
+        </div>
     </div>
 </div>
 {% endif %}
@@ -147,6 +153,7 @@
 
 {% block scripts %}
 <script>
+// Переключение отметки товара
 function toggleProduct(productId, checkbox) {
     const form = document.getElementById('toggleForm');
     form.action = `/products/toggle/${productId}`;
@@ -179,6 +186,7 @@ function toggleProduct(productId, checkbox) {
     });
 }
 
+// Выделить все
 function toggleAll() {
     const selectAll = document.getElementById('selectAll');
     const checkboxes = document.querySelectorAll('.product-checkbox');
@@ -189,26 +197,79 @@ function toggleAll() {
     });
 }
 
+// Обновление счётчика отметок
 function updateCounter() {
     const checked = document.querySelectorAll('.product-checkbox:checked').length;
     const total = document.querySelectorAll('.product-checkbox').length;
-    document.querySelector('.card-header .text-muted').textContent = `Отмечено: ${checked}`;
+    const counterEl = document.querySelector('.card-header .text-muted');
+    if (counterEl) {
+        counterEl.textContent = `Отмечено: ${checked}`;
+    }
 }
 
 // Автообновление статуса задачи
 {% if task_id %}
+let reloadAttempts = 0;
+const maxReloadAttempts = 30; // 30 * 5 сек = 2.5 минуты
+
 function checkTaskStatus() {
     fetch(`/products/status?task_id={{ task_id }}`)
         .then(response => response.json())
         .then(data => {
-            if (data.status === 'completed' || data.status === 'error') {
+            if (data.status === 'completed') {
+                // Задача завершена - перезагружаем страницу
+                location.reload();
+            } else if (data.status === 'error') {
+                // Ошибка - показываем сообщение
+                const alertDiv = document.querySelector('.alert-info');
+                if (alertDiv) {
+                    alertDiv.className = 'alert alert-danger mb-4';
+                    alertDiv.innerHTML = `
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>❌ Ошибка обновления:</strong> ${data.message}
+                            </div>
+                            <span class="badge bg-danger fs-6">Ошибка</span>
+                        </div>
+                    `;
+                }
+            } else if (data.status === 'running') {
+                // Обновляем прогресс
+                const progressBar = document.querySelector('.progress-bar');
+                if (progressBar && data.progress) {
+                    progressBar.style.width = data.progress + '%';
+                    progressBar.textContent = data.progress + '%';
+                }
+                // Обновляем сообщение
+                const msgEl = document.querySelector('.alert-info strong');
+                if (msgEl && data.message) {
+                    msgEl.textContent = 'Статус обновления: ' + data.message;
+                }
+            }
+            
+            reloadAttempts++;
+            if (reloadAttempts >= maxReloadAttempts) {
+                // Если прошло слишком много времени, перезагружаем страницу
                 location.reload();
             }
         })
-        .catch(() => {});
+        .catch(() => {
+            // Если ошибка запроса, пробуем перезагрузить через 30 секунд
+            reloadAttempts++;
+            if (reloadAttempts >= maxReloadAttempts) {
+                location.reload();
+            }
+        });
 }
 
+// Запускаем проверку каждые 5 секунд
 setInterval(checkTaskStatus, 5000);
+
+// Первая проверка через 2 секунды
+setTimeout(checkTaskStatus, 2000);
 {% endif %}
+
+// Обновляем счётчик при загрузке
+document.addEventListener('DOMContentLoaded', updateCounter);
 </script>
 {% endblock %}

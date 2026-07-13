@@ -1,11 +1,11 @@
 services:
   - type: web
-    name: hello-anatolyt
+    name: tittle_restart
     runtime: python
     plan: free
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 300 --workers 2 --threads 2
+    startCommand: gunicorn app:app --timeout 600 --workers 2 --threads 2 --max-requests 1000 --max-requests-jitter 100
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -16,15 +16,11 @@ services:
       - key: SECRET_KEY
         generateValue: true
       - key: GUNICORN_TIMEOUT
-        value: 300
+        value: 600
       - key: GUNICORN_WORKERS
         value: 2
       - key: GUNICORN_THREADS
         value: 2
-      - key: PGSSLMODE
-        value: require
-      - key: PGCONNECT_TIMEOUT
-        value: 10
 
 databases:
   - name: wb-api-db
