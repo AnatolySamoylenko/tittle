@@ -23,7 +23,6 @@ class ProductService:
                 return func()
             except (OperationalError, DisconnectionError) as e:
                 error_str = str(e).lower()
-                # Расширенный список ошибок соединения
                 if any(err in error_str for err in [
                     'ssl syscall error', 'eof detected', 'connection', 
                     'network', 'timeout', 'closed', 'reset'
@@ -31,7 +30,6 @@ class ProductService:
                     logger.warning(f"Database connection error (attempt {attempt+1}/{retries}): {e}")
                     if attempt < retries - 1:
                         db.session.rollback()
-                        # Экспоненциальная задержка: 1, 2, 4, 8, 16 секунд
                         time.sleep(delay * (2 ** attempt))
                         continue
                     else:
@@ -44,10 +42,9 @@ class ProductService:
                 raise
     
     @staticmethod
-    def get_products_from_wb(key_id: int) -> Tuple[bool, str, List[Dict]]:
-        """Получение списка товаров из API Wildberries с таймаутами"""
+    def get_products_from_wb(key_id: int, progress_callback=None) -> Tuple[bool, str, List[Dict]]:
+        """Получение списка товаров из API Wildberries с таймаутами и прогрессом"""
         try:
-            # Получаем ключ из БД с повторной попыткой
             def get_key():
                 return WBApiKey.query.get(key_id)
             
@@ -60,7 +57,6 @@ class ProductService:
                 'Content-Type': 'application/json'
             }
             
-            # Настраиваем сессию с таймаутами и повторными попытками
             session = requests.Session()
             retries = Retry(
                 total=3,
@@ -80,10 +76,14 @@ class ProductService:
             all_products = []
             cursor = None
             has_more = True
-            request_timeout = (15, 120)  # 15 сек на подключение, 120 сек на чтение
+            page = 0
+            request_timeout = (15, 120)
+            
+            if progress_callback:
+                progress_callback('start', 0, 'Начало получения товаров...')
             
             while has_more:
-                # Формируем запрос с пагинацией
+                page += 1
                 payload = {
                     "settings": {
                         "sort": {"ascending": True},
@@ -95,10 +95,12 @@ class ProductService:
                     payload["settings"]["cursor"]["updatedAt"] = cursor.get('updatedAt')
                     payload["settings"]["cursor"]["nmID"] = cursor.get('nmID')
                 
-                # Добавляем задержку для соблюдения лимитов API
                 time.sleep(0.3)
                 
                 try:
+                    if progress_callback:
+                        progress_callback('fetching', page, f'Загрузка страницы {page}...')
+                    
                     response = session.post(
                         f'{ProductService.BASE_URL}/content/v2/get/cards/list',
                         headers=headers,
@@ -107,9 +109,10 @@ class ProductService:
                     )
                     
                     if response.status_code == 429:
-                        # Превышен лимит запросов - ждём и повторяем
                         retry_after = int(response.headers.get('Retry-After', 5))
                         logger.warning(f"Rate limit exceeded, waiting {retry_after} seconds")
+                        if progress_callback:
+                            progress_callback('waiting', page, f'Лимит запросов, ожидание {retry_after} сек...')
                         time.sleep(retry_after)
                         continue
                     
@@ -122,26 +125,41 @@ class ProductService:
                     cards = data.get('cards', [])
                     cursor = data.get('cursor', {})
                     
+                    # Логируем первый товар для отладки категории
+                    if page == 1 and cards:
+                        logger.info(f"Sample product data: {cards[0].get('characteristics', [])}")
+                    
                     for card in cards:
-                        # Извлекаем категорию из характеристик с улучшенной логикой
                         category = ''
+                        subject_name = card.get('subjectName', '')
                         
                         # Ищем категорию в характеристиках
                         for char in card.get('characteristics', []):
                             char_name = char.get('name', '').lower()
                             # Проверяем разные варианты названия категории
-                            if char_name in ['категория', 'category', 'категория товара', 'категория товаров']:
+                            if char_name in ['категория', 'category', 'категория товара', 'категория товаров', 'категория товара:']:
                                 values = char.get('value', [])
                                 if values:
                                     if isinstance(values, list) and values:
+                                        # Берём первое значение из списка
                                         category = values[0] if values else ''
                                     elif isinstance(values, str):
                                         category = values
                                     break
                         
-                        # Если категория не найдена в характеристиках, пробуем взять из subjectName
+                        # Если категория не найдена, пробуем другие поля
                         if not category:
-                            category = card.get('subjectName', '')
+                            # Пробуем взять из subjectName
+                            category = subject_name
+                        
+                        # Если всё ещё пусто, пробуем взять из parentName (если есть)
+                        if not category:
+                            for char in card.get('characteristics', []):
+                                if 'родительская' in char.get('name', '').lower():
+                                    values = char.get('value', [])
+                                    if values and isinstance(values, list) and values:
+                                        category = values[0]
+                                        break
                         
                         all_products.append({
                             'nm_id': card.get('nmID'),
@@ -150,13 +168,15 @@ class ProductService:
                             'brand': card.get('brand', ''),
                             'category': category,
                             'subject_id': card.get('subjectID'),
-                            'subject_name': card.get('subjectName', ''),
+                            'subject_name': subject_name,
                             'imt_id': card.get('imtID'),
                             'updated_at': card.get('updatedAt')
                         })
                     
-                    # Проверяем, есть ли ещё данные
                     has_more = cursor.get('total', 0) >= 100
+                    
+                    if progress_callback:
+                        progress_callback('page_complete', page, f'Загружено {len(all_products)} товаров')
                     
                 except requests.exceptions.Timeout:
                     logger.error(f"Timeout getting products for key {key_id}")
@@ -168,6 +188,9 @@ class ProductService:
                     logger.error(f"Error in get_products_from_wb: {e}")
                     return False, f"Ошибка при получении товаров: {str(e)}", []
             
+            if progress_callback:
+                progress_callback('complete', page, f'Получено {len(all_products)} товаров')
+            
             return True, f"Получено {len(all_products)} товаров", all_products
             
         except Exception as e:
@@ -175,17 +198,17 @@ class ProductService:
             return False, f"Неожиданная ошибка: {str(e)}", []
     
     @staticmethod
-    def update_products_db(key_id: int, batch_size: int = 50) -> Tuple[bool, str]:
-        """
-        Обновление товаров в базе данных с обработкой по частям
-        
-        Args:
-            key_id: ID ключа
-            batch_size: Размер пакета для обработки (по умолчанию 50)
-        """
+    def update_products_db(key_id: int, batch_size: int = 50, progress_callback=None) -> Tuple[bool, str]:
+        """Обновление товаров в базе данных с обработкой по частям и прогрессом"""
         try:
+            if progress_callback:
+                progress_callback('start', 0, 'Начало обновления...')
+            
             # Получаем товары из API
-            success, message, products = ProductService.get_products_from_wb(key_id)
+            success, message, products = ProductService.get_products_from_wb(
+                key_id, 
+                progress_callback=lambda stage, page, msg: progress_callback('api', page, msg) if progress_callback else None
+            )
             if not success:
                 return False, message
             
@@ -196,11 +219,18 @@ class ProductService:
             updated = 0
             total = len(products)
             
+            if progress_callback:
+                progress_callback('db_start', 0, f'Обновление БД: {total} товаров...')
+            
             # Обрабатываем товары по частям
             for i in range(0, total, batch_size):
                 batch = products[i:i+batch_size]
                 batch_start = i + 1
                 batch_end = min(i + batch_size, total)
+                
+                if progress_callback:
+                    progress_callback('db_batch', int((i / total) * 100), 
+                                    f'Обработка {batch_start}-{batch_end} из {total}...')
                 
                 def update_batch():
                     nonlocal added, updated
@@ -209,7 +239,6 @@ class ProductService:
                             existing = WBProduct.query.filter_by(nm_id=product_data['nm_id']).first()
                             
                             if existing:
-                                # Обновляем существующий товар
                                 existing.vendor_code = product_data.get('vendor_code', existing.vendor_code)
                                 existing.title = product_data.get('title', existing.title)
                                 existing.brand = product_data.get('brand', existing.brand)
@@ -221,7 +250,6 @@ class ProductService:
                                 existing.key_id = key_id
                                 updated += 1
                             else:
-                                # Создаём новый товар
                                 new_product = WBProduct(
                                     nm_id=product_data['nm_id'],
                                     vendor_code=product_data.get('vendor_code', ''),
@@ -242,20 +270,24 @@ class ProductService:
                     
                     db.session.commit()
                 
-                # Выполняем обновление с повторными попытками при ошибках БД
                 ProductService._execute_with_retry(update_batch)
                 logger.info(f"Processed batch {batch_start}-{batch_end} of {total}")
+            
+            if progress_callback:
+                progress_callback('complete', 100, f'Готово! Добавлено: {added}, Обновлено: {updated}')
             
             return True, f"Добавлено: {added}, Обновлено: {updated}"
             
         except Exception as e:
             db.session.rollback()
             logger.error(f"Error updating products: {e}")
+            if progress_callback:
+                progress_callback('error', 0, f'Ошибка: {str(e)}')
             return False, f"Ошибка обновления БД: {str(e)}"
     
     @staticmethod
     def get_products_by_key(key_id: int, filters: Dict = None) -> List[WBProduct]:
-        """Получение товаров по ключу с фильтрацией и обработкой ошибок"""
+        """Получение товаров по ключу с фильтрацией"""
         try:
             def query_products():
                 query = WBProduct.query.filter_by(key_id=key_id)
@@ -282,15 +314,13 @@ class ProductService:
     
     @staticmethod
     def toggle_select(product_id: int, key_id: int) -> Tuple[bool, str]:
-        """Переключение статуса отметки товара с обработкой ошибок"""
+        """Переключение статуса отметки товара"""
         try:
             def toggle():
-                # Проверяем, существует ли товар
                 product = WBProduct.query.get(product_id)
                 if not product:
                     return False, "Товар не найден"
                 
-                # Проверяем, существует ли отметка
                 selection = SelectedProduct.query.filter_by(
                     product_id=product_id,
                     key_id=key_id
@@ -318,7 +348,7 @@ class ProductService:
     
     @staticmethod
     def get_selected_products(key_id: int) -> List[SelectedProduct]:
-        """Получение отмеченных товаров для ключа с обработкой ошибок"""
+        """Получение отмеченных товаров для ключа"""
         try:
             def query_selected():
                 return SelectedProduct.query.filter_by(key_id=key_id).all()
@@ -328,67 +358,3 @@ class ProductService:
         except Exception as e:
             logger.error(f"Error getting selected products: {e}")
             return []
-    
-    @staticmethod
-    def delete_products_for_key(key_id: int) -> Tuple[bool, str]:
-        """Удаление всех товаров для ключа с обработкой ошибок"""
-        try:
-            def delete_products():
-                # Проверяем, есть ли товары, которые используются другими ключами
-                products = WBProduct.query.filter_by(key_id=key_id).all()
-                deleted_count = 0
-                
-                for product in products:
-                    # Проверяем, есть ли у товара другие отметки
-                    other_selections = SelectedProduct.query.filter_by(product_id=product.id).filter(SelectedProduct.key_id != key_id).first()
-                    if not other_selections:
-                        db.session.delete(product)
-                        deleted_count += 1
-                    else:
-                        # Просто отвязываем от этого ключа
-                        product.key_id = None
-                
-                db.session.commit()
-                return True, f"Удалено товаров: {deleted_count}"
-            
-            return ProductService._execute_with_retry(delete_products)
-            
-        except Exception as e:
-            db.session.rollback()
-            logger.error(f"Error deleting products for key: {e}")
-            return False, f"Ошибка удаления товаров: {str(e)}"
-    
-    @staticmethod
-    def get_products_count(key_id: int) -> int:
-        """Получение количества товаров для ключа"""
-        try:
-            def query_count():
-                return WBProduct.query.filter_by(key_id=key_id).count()
-            
-            return ProductService._execute_with_retry(query_count)
-        except Exception as e:
-            logger.error(f"Error getting products count: {e}")
-            return 0
-    
-    @staticmethod
-    def get_products_stats(key_id: int) -> Dict[str, Any]:
-        """Получение статистики по товарам для ключа"""
-        try:
-            def query_stats():
-                total = WBProduct.query.filter_by(key_id=key_id).count()
-                selected = SelectedProduct.query.filter_by(key_id=key_id).count()
-                
-                # Получаем дату последнего обновления
-                last_product = WBProduct.query.filter_by(key_id=key_id).order_by(WBProduct.updated_at.desc()).first()
-                last_update = last_product.updated_at if last_product else None
-                
-                return {
-                    'total': total,
-                    'selected': selected,
-                    'last_update': last_update.strftime('%Y-%m-%d %H:%M:%S') if last_update else None
-                }
-            
-            return ProductService._execute_with_retry(query_stats)
-        except Exception as e:
-            logger.error(f"Error getting products stats: {e}")
-            return {'total': 0, 'selected': 0, 'last_update': None}
