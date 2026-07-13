@@ -6,6 +6,7 @@ from services.product_service import ProductService
 import os
 import logging
 import time
+import threading
 from datetime import datetime
 from functools import wraps
 from sqlalchemy.exc import OperationalError, DisconnectionError
@@ -50,6 +51,96 @@ db.init_app(app)
 # Создание таблиц
 with app.app_context():
     db.create_all()
+
+# Хранилище статусов фоновых задач
+task_status = {}
+
+
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+
+def run_update_products(key_id: int, task_id: str):
+    """Фоновая задача для обновления товаров"""
+    try:
+        task_status[task_id] = {'status': 'running', 'message': 'Начало обновления...', 'progress': 0}
+        
+        # Получаем товары из API
+        success, message, products = ProductService.get_products_from_wb(key_id)
+        if not success:
+            task_status[task_id] = {'status': 'error', 'message': message, 'progress': 0}
+            return
+        
+        if not products:
+            task_status[task_id] = {'status': 'completed', 'message': 'Нет товаров для обновления', 'progress': 100}
+            return
+        
+        task_status[task_id] = {'status': 'running', 'message': f'Получено {len(products)} товаров, обновление БД...', 'progress': 30}
+        
+        # Обновляем БД
+        added = 0
+        updated = 0
+        total = len(products)
+        
+        for i, product_data in enumerate(products):
+            try:
+                existing = WBProduct.query.filter_by(nm_id=product_data['nm_id']).first()
+                
+                if existing:
+                    existing.vendor_code = product_data.get('vendor_code', existing.vendor_code)
+                    existing.title = product_data.get('title', existing.title)
+                    existing.brand = product_data.get('brand', existing.brand)
+                    existing.category = product_data.get('category', existing.category)
+                    existing.subject_id = product_data.get('subject_id', existing.subject_id)
+                    existing.subject_name = product_data.get('subject_name', existing.subject_name)
+                    existing.imt_id = product_data.get('imt_id', existing.imt_id)
+                    existing.updated_at = datetime.utcnow()
+                    existing.key_id = key_id
+                    updated += 1
+                else:
+                    new_product = WBProduct(
+                        nm_id=product_data['nm_id'],
+                        vendor_code=product_data.get('vendor_code', ''),
+                        title=product_data.get('title', ''),
+                        brand=product_data.get('brand', ''),
+                        category=product_data.get('category', ''),
+                        subject_id=product_data.get('subject_id'),
+                        subject_name=product_data.get('subject_name', ''),
+                        imt_id=product_data.get('imt_id'),
+                        key_id=key_id,
+                        updated_at=datetime.utcnow()
+                    )
+                    db.session.add(new_product)
+                    added += 1
+                
+                # Обновляем прогресс каждые 10 товаров
+                if i % 10 == 0:
+                    progress = 30 + int((i / total) * 60)
+                    task_status[task_id] = {
+                        'status': 'running',
+                        'message': f'Обработано {i+1}/{total} товаров...',
+                        'progress': progress
+                    }
+                    db.session.commit()
+                    
+            except Exception as e:
+                logger.error(f"Error processing product {product_data.get('nm_id')}: {e}")
+                continue
+        
+        db.session.commit()
+        
+        task_status[task_id] = {
+            'status': 'completed',
+            'message': f'Добавлено: {added}, Обновлено: {updated}',
+            'progress': 100,
+            'added': added,
+            'updated': updated,
+            'total': total
+        }
+        logger.info(f"Products update completed for key {key_id}: added={added}, updated={updated}")
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error in background update: {e}")
+        task_status[task_id] = {'status': 'error', 'message': str(e), 'progress': 0}
 
 
 # ==================== ДЕКОРАТОР ДЛЯ ОБРАБОТКИ ОШИБОК БД ====================
@@ -239,27 +330,52 @@ def products():
     if products:
         last_update = max((p.updated_at for p in products if p.updated_at), default=None)
     
+    # Проверяем статус фоновой задачи
+    task_id = request.args.get('task_id', '')
+    task_info = task_status.get(task_id, {})
+    
     return render_template('products.html', 
                          products=products, 
                          selected_ids=selected_ids,
                          filters=filters,
                          key_id=content_key.id,
                          last_update=last_update,
-                         key_name=content_key.name)
+                         key_name=content_key.name,
+                         task_id=task_id,
+                         task_info=task_info)
 
 
 @app.route('/products/update', methods=['POST'])
 @db_retry()
 def update_products():
-    """Обновление списка товаров"""
+    """Запуск обновления списка товаров в фоновом режиме"""
     key_id = request.form.get('key_id', type=int)
     if not key_id:
         flash('Не указан ключ для обновления', 'danger')
         return redirect(url_for('products'))
     
-    success, message = ProductService.update_products_db(key_id)
-    flash(message, 'success' if success else 'danger')
-    return redirect(url_for('products'))
+    # Генерируем ID задачи
+    task_id = f"update_{key_id}_{int(time.time())}"
+    
+    # Запускаем обновление в фоновом потоке
+    thread = threading.Thread(target=run_update_products, args=(key_id, task_id))
+    thread.daemon = True
+    thread.start()
+    
+    flash('Обновление товаров запущено в фоновом режиме. Это может занять несколько минут.', 'info')
+    return redirect(url_for('products', task_id=task_id))
+
+
+@app.route('/products/status')
+@db_retry()
+def products_status():
+    """Проверка статуса обновления товаров"""
+    task_id = request.args.get('task_id', '')
+    if not task_id:
+        return jsonify({'error': 'Не указан ID задачи'}), 400
+    
+    info = task_status.get(task_id, {'status': 'not_found', 'message': 'Задача не найдена'})
+    return jsonify(info)
 
 
 @app.route('/products/toggle/<int:product_id>', methods=['POST'])
@@ -304,8 +420,14 @@ def advertising():
 
 @app.route('/health')
 def health():
-    """Health check для Render"""
-    return 'OK', 200
+    """Health check для Render с проверкой БД"""
+    try:
+        # Проверяем соединение с БД
+        db.session.execute('SELECT 1')
+        return 'OK', 200
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return 'DB Error', 500
 
 
 # ==================== ОБРАБОТЧИКИ ОШИБОК ====================
@@ -328,6 +450,14 @@ def handle_db_error(error):
     db.session.rollback()
     logger.error(f"Database error: {error}")
     flash('Ошибка подключения к базе данных. Попробуйте позже.', 'danger')
+    return redirect(url_for('index'))
+
+
+@app.errorhandler(502)
+def handle_bad_gateway(error):
+    """Обработчик ошибки 502 Bad Gateway"""
+    logger.error(f"502 Bad Gateway: {error}")
+    flash('Сервер временно недоступен. Попробуйте позже.', 'danger')
     return redirect(url_for('index'))
 
 
