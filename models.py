@@ -12,16 +12,13 @@ class WBApiKey(db.Model):
     key = db.Column(db.String(500), nullable=False, unique=True)
     name = db.Column(db.String(200), nullable=False)
     description = db.Column(db.String(500))
-    token_type = db.Column(db.String(50))  # personal, service, base, test
+    token_type = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_checked = db.Column(db.DateTime)
     is_active = db.Column(db.Boolean, default=True)
-    
-    # Храним информацию о доступах в JSON
     access_info = db.Column(db.JSON, default=dict)
     
-    # Связи с другими таблицами
     products = db.relationship('WBProduct', backref='key', lazy='dynamic')
     selections = db.relationship('SelectedProduct', backref='key', lazy='dynamic')
     logs = db.relationship('WBApiLog', backref='key', lazy='dynamic')
@@ -30,7 +27,6 @@ class WBApiKey(db.Model):
         return f'<WBApiKey {self.name}>'
     
     def to_dict(self):
-        """Преобразование в словарь для отображения"""
         return {
             'id': self.id,
             'name': self.name,
@@ -52,7 +48,7 @@ class WBApiLog(db.Model):
     endpoint = db.Column(db.String(200))
     method = db.Column(db.String(10))
     status_code = db.Column(db.Integer)
-    response_time = db.Column(db.Float)  # в секундах
+    response_time = db.Column(db.Float)
     error_message = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -65,21 +61,18 @@ class WBProduct(db.Model):
     __tablename__ = 'wb_products'
     
     id = db.Column(db.Integer, primary_key=True)
-    nm_id = db.Column(db.Integer, unique=True, nullable=False)  # Артикул WB
-    vendor_code = db.Column(db.String(100))  # Артикул продавца
-    title = db.Column(db.String(500))  # Наименование товара
-    brand = db.Column(db.String(200))  # Бренд
-    category = db.Column(db.String(200))  # Категория
-    subject_id = db.Column(db.Integer)  # ID предмета
-    subject_name = db.Column(db.String(200))  # Название предмета
-    imt_id = db.Column(db.Integer)  # ID объединённой карточки
+    nm_id = db.Column(db.BigInteger, unique=True, nullable=False)  # BigInteger для больших чисел
+    vendor_code = db.Column(db.String(100))
+    title = db.Column(db.String(500))
+    brand = db.Column(db.String(200))
+    category = db.Column(db.String(200))
+    subject_id = db.Column(db.Integer)
+    subject_name = db.Column(db.String(200))
+    imt_id = db.Column(db.BigInteger)  # ИСПРАВЛЕНО: BigInteger
     updated_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Связь с ключом
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'))
     
-    # Связь с отметками
     selections = db.relationship('SelectedProduct', backref='product', lazy='dynamic')
     
     def __repr__(self):
@@ -94,6 +87,7 @@ class WBProduct(db.Model):
             'brand': self.brand,
             'category': self.category,
             'subject_name': self.subject_name,
+            'imt_id': self.imt_id,
             'updated_at': self.updated_at.strftime('%Y-%m-%d %H:%M') if self.updated_at else None,
             'created_at': self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else None,
             'is_selected': bool(self.selections.first())
@@ -108,7 +102,7 @@ class SelectedProduct(db.Model):
     product_id = db.Column(db.Integer, db.ForeignKey('wb_products.id'), nullable=False)
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'), nullable=False)
     selected_at = db.Column(db.DateTime, default=datetime.utcnow)
-    note = db.Column(db.String(500))  # Примечание
+    note = db.Column(db.String(500))
     
     __table_args__ = (
         db.UniqueConstraint('product_id', 'key_id', name='unique_product_key_selection'),
