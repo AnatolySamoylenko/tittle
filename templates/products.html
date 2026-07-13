@@ -46,7 +46,7 @@
                 <input type="text" class="form-control" name="brand" placeholder="Бренд" value="{{ filters.brand }}">
             </div>
             <div class="col-md-2">
-                <input type="text" class="form-control" name="category" placeholder="Категория" value="{{ filters.category }}">
+                <input type="text" class="form-control" name="subject_name" placeholder="Предмет" value="{{ filters.subject_name }}">
             </div>
             <div class="col-md-2 d-flex gap-2">
                 <button type="submit" class="btn btn-primary flex-grow-1">
@@ -120,7 +120,7 @@
                         <th>Наименование</th>
                         <th>Артикул продавца</th>
                         <th>Бренд</th>
-                        <th>Категория</th>
+                        <th>Предмет</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -137,8 +137,8 @@
                         <td>{{ product.vendor_code or '—' }}</td>
                         <td>{{ product.brand or '—' }}</td>
                         <td>
-                            {% if product.category %}
-                            <span class="badge bg-light text-dark">{{ product.category }}</span>
+                            {% if product.subject_name %}
+                            <span class="badge bg-light text-dark">{{ product.subject_name }}</span>
                             {% else %}
                             <span class="text-muted">—</span>
                             {% endif %}
@@ -205,10 +205,9 @@ function updateCounter() {
     document.querySelector('.card-header .text-muted').textContent = `Отмечено: ${checked}`;
 }
 
-// Автообновление статуса задачи
 {% if task_id %}
 let reloadAttempts = 0;
-const maxReloadAttempts = 120; // 120 * 3 сек = 6 минут
+const maxReloadAttempts = 120;
 
 function checkTaskStatus() {
     fetch(`/products/status?task_id={{ task_id }}`)
@@ -226,7 +225,6 @@ function checkTaskStatus() {
                     `;
                 }
             } else if (data.status === 'running') {
-                // Обновляем прогресс
                 const progressBar = document.querySelector('.progress-bar');
                 if (progressBar && data.progress !== undefined) {
                     progressBar.style.width = data.progress + '%';

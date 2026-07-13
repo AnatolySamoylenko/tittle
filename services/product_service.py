@@ -125,50 +125,14 @@ class ProductService:
                     cards = data.get('cards', [])
                     cursor = data.get('cursor', {})
                     
-                    # Логируем первый товар для отладки категории
-                    if page == 1 and cards:
-                        logger.info(f"Sample product data: {cards[0].get('characteristics', [])}")
-                    
                     for card in cards:
-                        category = ''
-                        subject_name = card.get('subjectName', '')
-                        
-                        # Ищем категорию в характеристиках
-                        for char in card.get('characteristics', []):
-                            char_name = char.get('name', '').lower()
-                            # Проверяем разные варианты названия категории
-                            if char_name in ['категория', 'category', 'категория товара', 'категория товаров', 'категория товара:']:
-                                values = char.get('value', [])
-                                if values:
-                                    if isinstance(values, list) and values:
-                                        # Берём первое значение из списка
-                                        category = values[0] if values else ''
-                                    elif isinstance(values, str):
-                                        category = values
-                                    break
-                        
-                        # Если категория не найдена, пробуем другие поля
-                        if not category:
-                            # Пробуем взять из subjectName
-                            category = subject_name
-                        
-                        # Если всё ещё пусто, пробуем взять из parentName (если есть)
-                        if not category:
-                            for char in card.get('characteristics', []):
-                                if 'родительская' in char.get('name', '').lower():
-                                    values = char.get('value', [])
-                                    if values and isinstance(values, list) and values:
-                                        category = values[0]
-                                        break
-                        
                         all_products.append({
                             'nm_id': card.get('nmID'),
                             'vendor_code': card.get('vendorCode', ''),
                             'title': card.get('title', ''),
                             'brand': card.get('brand', ''),
-                            'category': category,
+                            'subject_name': card.get('subjectName', ''),  # ИСПОЛЬЗУЕМ subjectName
                             'subject_id': card.get('subjectID'),
-                            'subject_name': subject_name,
                             'imt_id': card.get('imtID'),
                             'updated_at': card.get('updatedAt')
                         })
@@ -204,7 +168,6 @@ class ProductService:
             if progress_callback:
                 progress_callback('start', 0, 'Начало обновления...')
             
-            # Получаем товары из API
             success, message, products = ProductService.get_products_from_wb(
                 key_id, 
                 progress_callback=lambda stage, page, msg: progress_callback('api', page, msg) if progress_callback else None
@@ -222,7 +185,6 @@ class ProductService:
             if progress_callback:
                 progress_callback('db_start', 0, f'Обновление БД: {total} товаров...')
             
-            # Обрабатываем товары по частям
             for i in range(0, total, batch_size):
                 batch = products[i:i+batch_size]
                 batch_start = i + 1
@@ -242,9 +204,8 @@ class ProductService:
                                 existing.vendor_code = product_data.get('vendor_code', existing.vendor_code)
                                 existing.title = product_data.get('title', existing.title)
                                 existing.brand = product_data.get('brand', existing.brand)
-                                existing.category = product_data.get('category', existing.category)
-                                existing.subject_id = product_data.get('subject_id', existing.subject_id)
                                 existing.subject_name = product_data.get('subject_name', existing.subject_name)
+                                existing.subject_id = product_data.get('subject_id', existing.subject_id)
                                 existing.imt_id = product_data.get('imt_id', existing.imt_id)
                                 existing.updated_at = datetime.utcnow()
                                 existing.key_id = key_id
@@ -255,9 +216,8 @@ class ProductService:
                                     vendor_code=product_data.get('vendor_code', ''),
                                     title=product_data.get('title', ''),
                                     brand=product_data.get('brand', ''),
-                                    category=product_data.get('category', ''),
-                                    subject_id=product_data.get('subject_id'),
                                     subject_name=product_data.get('subject_name', ''),
+                                    subject_id=product_data.get('subject_id'),
                                     imt_id=product_data.get('imt_id'),
                                     key_id=key_id,
                                     updated_at=datetime.utcnow()
@@ -301,8 +261,8 @@ class ProductService:
                         query = query.filter(WBProduct.vendor_code.ilike(f"%{filters['vendor_code']}%"))
                     if filters.get('brand'):
                         query = query.filter(WBProduct.brand.ilike(f"%{filters['brand']}%"))
-                    if filters.get('category'):
-                        query = query.filter(WBProduct.category.ilike(f"%{filters['category']}%"))
+                    if filters.get('subject_name'):
+                        query = query.filter(WBProduct.subject_name.ilike(f"%{filters['subject_name']}%"))
                 
                 return query.order_by(WBProduct.nm_id).all()
             
@@ -358,3 +318,63 @@ class ProductService:
         except Exception as e:
             logger.error(f"Error getting selected products: {e}")
             return []
+    
+    @staticmethod
+    def delete_products_for_key(key_id: int) -> Tuple[bool, str]:
+        """Удаление всех товаров для ключа с обработкой ошибок"""
+        try:
+            def delete_products():
+                products = WBProduct.query.filter_by(key_id=key_id).all()
+                deleted_count = 0
+                
+                for product in products:
+                    other_selections = SelectedProduct.query.filter_by(product_id=product.id).filter(SelectedProduct.key_id != key_id).first()
+                    if not other_selections:
+                        db.session.delete(product)
+                        deleted_count += 1
+                    else:
+                        product.key_id = None
+                
+                db.session.commit()
+                return True, f"Удалено товаров: {deleted_count}"
+            
+            return ProductService._execute_with_retry(delete_products)
+            
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Error deleting products for key: {e}")
+            return False, f"Ошибка удаления товаров: {str(e)}"
+    
+    @staticmethod
+    def get_products_count(key_id: int) -> int:
+        """Получение количества товаров для ключа"""
+        try:
+            def query_count():
+                return WBProduct.query.filter_by(key_id=key_id).count()
+            
+            return ProductService._execute_with_retry(query_count)
+        except Exception as e:
+            logger.error(f"Error getting products count: {e}")
+            return 0
+    
+    @staticmethod
+    def get_products_stats(key_id: int) -> Dict[str, Any]:
+        """Получение статистики по товарам для ключа"""
+        try:
+            def query_stats():
+                total = WBProduct.query.filter_by(key_id=key_id).count()
+                selected = SelectedProduct.query.filter_by(key_id=key_id).count()
+                
+                last_product = WBProduct.query.filter_by(key_id=key_id).order_by(WBProduct.updated_at.desc()).first()
+                last_update = last_product.updated_at if last_product else None
+                
+                return {
+                    'total': total,
+                    'selected': selected,
+                    'last_update': last_update.strftime('%Y-%m-%d %H:%M:%S') if last_update else None
+                }
+            
+            return ProductService._execute_with_retry(query_stats)
+        except Exception as e:
+            logger.error(f"Error getting products stats: {e}")
+            return {'total': 0, 'selected': 0, 'last_update': None}
