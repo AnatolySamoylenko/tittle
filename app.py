@@ -5,8 +5,10 @@ from services.wb_api import WBApiService
 from services.product_service import ProductService
 import os
 import logging
-import jwt
+import time
 from datetime import datetime
+from functools import wraps
+from sqlalchemy.exc import OperationalError, DisconnectionError
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -17,11 +19,31 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-i
 
 # Настройка базы данных
 database_url = os.environ.get('DATABASE_URL')
-if database_url and database_url.startswith('postgres://'):
-    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+if database_url:
+    # Добавляем параметры для стабильности соединения
+    # sslmode=require - принудительно используем SSL
+    # connect_timeout=10 - ждем подключения не более 10 секунд
+    # sslcompression=0 - отключаем сжатие SSL (может вызывать ошибки)
+    if '?' in database_url:
+        database_url += '&sslmode=require&connect_timeout=10&sslcompression=0'
+    else:
+        database_url += '?sslmode=require&connect_timeout=10&sslcompression=0'
+    
+    # Заменяем postgres:// на postgresql:// (если нужно)
+    if database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url or 'sqlite:///wb_keys.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Добавляем настройки пула соединений (важно для Render!)
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,          # Проверять соединение перед использованием
+    'pool_recycle': 280,            # Пересоздавать соединение через 280 секунд
+    'pool_timeout': 30,             # Таймаут ожидания соединения из пула
+    'max_overflow': 10,             # Максимальное количество дополнительных соединений
+    'pool_size': 5,                 # Размер пула
+}
 
 db.init_app(app)
 
@@ -30,9 +52,43 @@ with app.app_context():
     db.create_all()
 
 
+# ==================== ДЕКОРАТОР ДЛЯ ОБРАБОТКИ ОШИБОК БД ====================
+
+def db_retry(max_retries=3, delay=1):
+    """Декоратор для повторных попыток при ошибках БД"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return f(*args, **kwargs)
+                except (OperationalError, DisconnectionError) as e:
+                    error_str = str(e).lower()
+                    if 'ssl syscall error' in error_str or 'eof detected' in error_str or 'connection' in error_str:
+                        if attempt < max_retries - 1:
+                            db.session.rollback()
+                            logger.warning(f"DB error in {f.__name__}, retry {attempt+1}/{max_retries}: {e}")
+                            time.sleep(delay * (attempt + 1))
+                            continue
+                        else:
+                            logger.error(f"DB error in {f.__name__} after {max_retries} retries: {e}")
+                            flash('Ошибка подключения к базе данных. Попробуйте позже.', 'danger')
+                            return redirect(url_for('index'))
+                    else:
+                        raise
+                except Exception as e:
+                    logger.error(f"Unexpected error in {f.__name__}: {e}")
+                    flash(f'Ошибка: {str(e)}', 'danger')
+                    return redirect(url_for('index'))
+            return redirect(url_for('index'))
+        return decorated_function
+    return decorator
+
+
 # ==================== ГЛАВНАЯ СТРАНИЦА ====================
 
 @app.route('/')
+@db_retry()
 def index():
     """Главная страница с меню"""
     keys_count = WBApiKey.query.filter_by(is_active=True).count()
@@ -42,6 +98,7 @@ def index():
 # ==================== УПРАВЛЕНИЕ КЛЮЧАМИ ====================
 
 @app.route('/keys')
+@db_retry()
 def keys_list():
     """Управление ключами - список всех ключей (только активные)"""
     keys = KeyManager.get_all_keys(include_inactive=False)
@@ -49,6 +106,7 @@ def keys_list():
 
 
 @app.route('/keys/all')
+@db_retry()
 def keys_all():
     """Управление ключами - список всех ключей (включая неактивные)"""
     keys = KeyManager.get_all_keys(include_inactive=True)
@@ -56,6 +114,7 @@ def keys_all():
 
 
 @app.route('/keys/add', methods=['GET', 'POST'])
+@db_retry()
 def add_key():
     """Добавление нового ключа"""
     if request.method == 'POST':
@@ -79,6 +138,7 @@ def add_key():
 
 
 @app.route('/keys/<int:key_id>')
+@db_retry()
 def key_detail(key_id):
     """Детальная информация о ключе"""
     key = KeyManager.get_key(key_id)
@@ -91,6 +151,7 @@ def key_detail(key_id):
 
 
 @app.route('/keys/<int:key_id>/check', methods=['POST'])
+@db_retry()
 def check_key(key_id):
     """Проверка подключения по ключу"""
     success, message, details = KeyManager.check_key_connection(key_id)
@@ -102,6 +163,7 @@ def check_key(key_id):
 
 
 @app.route('/keys/<int:key_id>/delete', methods=['POST'])
+@db_retry()
 def delete_key(key_id):
     """Полное удаление ключа из базы данных"""
     success, message = KeyManager.delete_key_permanently(key_id)
@@ -114,6 +176,7 @@ def delete_key(key_id):
 
 
 @app.route('/keys/<int:key_id>/restore', methods=['POST'])
+@db_retry()
 def restore_key(key_id):
     """Восстановление удалённого (неактивного) ключа"""
     success, message = KeyManager.restore_key(key_id)
@@ -122,6 +185,7 @@ def restore_key(key_id):
 
 
 @app.route('/keys/check-all', methods=['POST'])
+@db_retry()
 def check_all_keys():
     """Проверка всех активных ключей"""
     results = KeyManager.check_all_keys()
@@ -133,6 +197,7 @@ def check_all_keys():
 # ==================== УПРАВЛЕНИЕ ТОВАРАМИ ====================
 
 @app.route('/products')
+@db_retry()
 def products():
     """Управление товарами"""
     # Проверяем, есть ли у пользователя активный ключ с доступом к Контенту
@@ -184,6 +249,7 @@ def products():
 
 
 @app.route('/products/update', methods=['POST'])
+@db_retry()
 def update_products():
     """Обновление списка товаров"""
     key_id = request.form.get('key_id', type=int)
@@ -197,6 +263,7 @@ def update_products():
 
 
 @app.route('/products/toggle/<int:product_id>', methods=['POST'])
+@db_retry()
 def toggle_product(product_id):
     """Переключение отметки товара"""
     key_id = request.form.get('key_id', type=int)
@@ -208,6 +275,7 @@ def toggle_product(product_id):
 
 
 @app.route('/products/selected')
+@db_retry()
 def selected_products():
     """Список отмеченных товаров"""
     key_id = request.args.get('key_id', type=int)
@@ -226,6 +294,7 @@ def selected_products():
 # ==================== УПРАВЛЕНИЕ РЕКЛАМОЙ ====================
 
 @app.route('/advertising')
+@db_retry()
 def advertising():
     """Управление рекламой"""
     return render_template('advertising.html')
@@ -249,7 +318,17 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     db.session.rollback()
+    logger.error(f"Internal server error: {error}")
     return render_template('500.html'), 500
+
+
+@app.errorhandler(OperationalError)
+def handle_db_error(error):
+    """Обработчик ошибок базы данных"""
+    db.session.rollback()
+    logger.error(f"Database error: {error}")
+    flash('Ошибка подключения к базе данных. Попробуйте позже.', 'danger')
+    return redirect(url_for('index'))
 
 
 # ==================== ЗАПУСК ====================

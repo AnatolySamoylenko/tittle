@@ -5,6 +5,8 @@ import json
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,26 @@ class WBApiService:
             'Authorization': api_key,
             'Content-Type': 'application/json'
         }
+        
+        # Настраиваем сессию с повторными попытками и таймаутами
+        self.session = requests.Session()
+        retries = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[408, 429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"],
+            raise_on_status=False
+        )
+        adapter = HTTPAdapter(
+            max_retries=retries,
+            pool_connections=10,
+            pool_maxsize=10
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+        
+        # Таймауты для запросов: (connect_timeout, read_timeout)
+        self.timeout = (10, 30)  # 10 сек на подключение, 30 сек на чтение
         
     def decode_token(self) -> Dict[str, Any]:
         """Декодирование JWT токена для получения информации"""
@@ -135,13 +157,13 @@ class WBApiService:
         return categories
     
     def check_connection(self, category: str = 'common') -> Tuple[bool, str, Optional[Dict]]:
-        """Проверка подключения к API"""
+        """Проверка подключения к API с таймаутом"""
         base_url = self.BASE_URLS.get(category, self.BASE_URLS['common'])
         url = f"{base_url}/ping"
         
         try:
             start_time = time.time()
-            response = requests.get(url, headers=self.headers, timeout=10)
+            response = self.session.get(url, headers=self.headers, timeout=self.timeout)
             response_time = time.time() - start_time
             
             if response.status_code == 200:
@@ -159,21 +181,25 @@ class WBApiService:
                     'response_time': round(response_time, 3)
                 }
         except requests.exceptions.Timeout:
-            return False, "Превышено время ожидания", {'error': 'timeout'}
+            logger.error(f"Timeout checking connection for {category}")
+            return False, "Превышено время ожидания ответа от API", {'error': 'timeout'}
         except requests.exceptions.ConnectionError:
+            logger.error(f"Connection error checking connection for {category}")
             return False, "Ошибка подключения к серверу", {'error': 'connection_error'}
         except Exception as e:
+            logger.error(f"Error checking connection: {e}")
             return False, f"Неизвестная ошибка: {str(e)}", {'error': str(e)}
     
     def check_all_categories(self) -> Dict[str, Dict]:
-        """Проверка доступа ко всем категориям"""
+        """Проверка доступа ко всем категориям с таймаутами"""
         results = {}
+        timeout_per_category = (5, 10)  # 5 сек на подключение, 10 сек на чтение
         
         for category, url in self.BASE_URLS.items():
             ping_url = f"{url}/ping"
             try:
                 start_time = time.time()
-                response = requests.get(ping_url, headers=self.headers, timeout=5)
+                response = self.session.get(ping_url, headers=self.headers, timeout=timeout_per_category)
                 response_time = time.time() - start_time
                 
                 results[category] = {
@@ -189,7 +215,22 @@ class WBApiService:
                     error_data = response.json() if response.text else {}
                     results[category]['detail'] = error_data.get('detail', response.text)
                     
+            except requests.exceptions.Timeout:
+                logger.warning(f"Timeout checking category {category}")
+                results[category] = {
+                    'status': 'error',
+                    'detail': 'Превышено время ожидания',
+                    'response_time': None
+                }
+            except requests.exceptions.ConnectionError:
+                logger.warning(f"Connection error checking category {category}")
+                results[category] = {
+                    'status': 'error',
+                    'detail': 'Ошибка подключения',
+                    'response_time': None
+                }
             except Exception as e:
+                logger.error(f"Error checking category {category}: {e}")
                 results[category] = {
                     'status': 'error',
                     'detail': str(e),
@@ -202,11 +243,11 @@ class WBApiService:
         return results
     
     def get_seller_info(self) -> Tuple[bool, Dict]:
-        """Получение информации о продавце"""
+        """Получение информации о продавце с таймаутом"""
         url = f"{self.BASE_URLS['common']}/api/v1/seller-info"
         
         try:
-            response = requests.get(url, headers=self.headers, timeout=10)
+            response = self.session.get(url, headers=self.headers, timeout=self.timeout)
             
             if response.status_code == 200:
                 data = response.json()
@@ -214,5 +255,59 @@ class WBApiService:
             else:
                 error_data = response.json() if response.text else {}
                 return False, {'error': error_data.get('detail', response.text)}
+        except requests.exceptions.Timeout:
+            logger.error("Timeout getting seller info")
+            return False, {'error': 'Превышено время ожидания ответа от API'}
+        except requests.exceptions.ConnectionError:
+            logger.error("Connection error getting seller info")
+            return False, {'error': 'Ошибка подключения к серверу'}
         except Exception as e:
+            logger.error(f"Error getting seller info: {e}")
             return False, {'error': str(e)}
+    
+    def make_request(self, method: str, url: str, data: Dict = None, 
+                     timeout: Tuple[int, int] = None) -> Tuple[bool, Dict, Optional[int]]:
+        """
+        Универсальный метод для выполнения запросов к API с таймаутами
+        
+        Args:
+            method: HTTP метод (GET, POST, PUT, DELETE)
+            url: URL запроса
+            data: Данные для отправки (для POST/PUT)
+            timeout: Таймаут (connect, read)
+        
+        Returns:
+            Tuple[bool, Dict, Optional[int]]: (success, response_data, status_code)
+        """
+        if timeout is None:
+            timeout = self.timeout
+            
+        try:
+            if method.upper() == 'GET':
+                response = self.session.get(url, headers=self.headers, timeout=timeout)
+            elif method.upper() == 'POST':
+                response = self.session.post(url, headers=self.headers, json=data, timeout=timeout)
+            elif method.upper() == 'PUT':
+                response = self.session.put(url, headers=self.headers, json=data, timeout=timeout)
+            elif method.upper() == 'DELETE':
+                response = self.session.delete(url, headers=self.headers, timeout=timeout)
+            else:
+                return False, {'error': f'Unsupported method: {method}'}, None
+            
+            if response.status_code in [200, 201, 204]:
+                if response.text:
+                    return True, response.json(), response.status_code
+                return True, {}, response.status_code
+            else:
+                error_data = response.json() if response.text else {}
+                return False, error_data, response.status_code
+                
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout on {method} request to {url}")
+            return False, {'error': 'Превышено время ожидания ответа от API'}, None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Connection error on {method} request to {url}")
+            return False, {'error': 'Ошибка подключения к серверу'}, None
+        except Exception as e:
+            logger.error(f"Error on {method} request to {url}: {e}")
+            return False, {'error': str(e)}, None
