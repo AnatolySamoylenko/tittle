@@ -36,12 +36,25 @@
                         подключения к API Wildberries.
                     </div>
                     
+                    <div class="alert alert-warning">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <strong>Подсказка:</strong> Если вы видите сообщение, что ключ уже существует, но помечен как неактивный:
+                        <ul class="mb-0 mt-1">
+                            <li><a href="{{ url_for('keys_all') }}">Перейдите в список всех ключей</a></li>
+                            <li>Найдите нужный ключ и нажмите <strong>"Восстановить"</strong></li>
+                            <li>Или нажмите <strong>"Удалить навсегда"</strong>, если ключ больше не нужен</li>
+                        </ul>
+                    </div>
+                    
                     <div class="d-flex gap-2">
                         <button type="submit" class="btn btn-primary">
                             <i class="bi bi-plus"></i> Добавить
                         </button>
                         <a href="{{ url_for('keys_list') }}" class="btn btn-secondary">
                             <i class="bi bi-arrow-left"></i> Отмена
+                        </a>
+                        <a href="{{ url_for('keys_all') }}" class="btn btn-outline-warning ms-auto">
+                            <i class="bi bi-eye"></i> Показать все ключи
                         </a>
                     </div>
                 </form>

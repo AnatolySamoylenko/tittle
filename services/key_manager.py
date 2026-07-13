@@ -20,7 +20,7 @@ class KeyManager:
                 if existing.is_active:
                     return False, f"Ключ с таким значением уже существует (ID: {existing.id}, название: '{existing.name}')", None
                 else:
-                    # Если ключ неактивен, предлагаем его восстановить
+                    # Если ключ неактивен, предлагаем его восстановить или пересоздать
                     return False, f"Ключ с таким значением существует, но помечен как неактивный (ID: {existing.id}). Используйте восстановление или удалите его.", None
             
             # Получаем информацию о ключе
@@ -113,7 +113,7 @@ class KeyManager:
             
             key.is_active = True
             db.session.commit()
-            return True, "Ключ успешно восстановлен"
+            return True, f"Ключ '{key.name}' успешно восстановлен"
             
         except Exception as e:
             db.session.rollback()
@@ -133,7 +133,7 @@ class KeyManager:
             
             key.is_active = False
             db.session.commit()
-            return True, "Ключ деактивирован (скрыт из списка)"
+            return True, f"Ключ '{key.name}' деактивирован (скрыт из списка)"
             
         except Exception as e:
             db.session.rollback()

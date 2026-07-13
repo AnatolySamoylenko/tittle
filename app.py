@@ -45,7 +45,7 @@ def index():
 def keys_list():
     """Управление ключами - список всех ключей (только активные)"""
     keys = KeyManager.get_all_keys(include_inactive=False)
-    return render_template('keys.html', keys=keys)
+    return render_template('keys.html', keys=keys, show_inactive=False)
 
 
 @app.route('/keys/all')
@@ -106,6 +106,10 @@ def delete_key(key_id):
     """Полное удаление ключа из базы данных"""
     success, message = KeyManager.delete_key_permanently(key_id)
     flash(message, 'success' if success else 'danger')
+    # Определяем, откуда пришли (из списка всех ключей или активных)
+    referer = request.referrer or ''
+    if 'keys/all' in referer:
+        return redirect(url_for('keys_all'))
     return redirect(url_for('keys_list'))
 
 
@@ -114,7 +118,7 @@ def restore_key(key_id):
     """Восстановление удалённого (неактивного) ключа"""
     success, message = KeyManager.restore_key(key_id)
     flash(message, 'success' if success else 'danger')
-    return redirect(url_for('keys_list'))
+    return redirect(url_for('keys_all'))
 
 
 @app.route('/keys/check-all', methods=['POST'])
