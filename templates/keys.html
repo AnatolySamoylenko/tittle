@@ -10,21 +10,23 @@
         <span class="badge bg-warning text-dark">Показаны все ключи (включая неактивные)</span>
         {% endif %}
     </div>
-    <div>
+    <div class="d-flex gap-2 flex-wrap">
         {% if show_inactive %}
-        <a href="{{ url_for('keys_list') }}" class="btn btn-outline-secondary me-2">
+        <a href="{{ url_for('keys_list') }}" class="btn btn-outline-secondary">
             <i class="bi bi-eye"></i> Только активные
         </a>
         {% else %}
-        <a href="{{ url_for('keys_all') }}" class="btn btn-outline-warning me-2">
-            <i class="bi bi-eye"></i> Показать все (включая неактивные)
+        <a href="{{ url_for('keys_all') }}" class="btn btn-outline-warning">
+            <i class="bi bi-eye"></i> Показать все
         </a>
         {% endif %}
+        
         <form method="POST" action="{{ url_for('check_all_keys') }}" class="d-inline">
-            <button type="submit" class="btn btn-outline-info me-2">
+            <button type="submit" class="btn btn-outline-info">
                 <i class="bi bi-arrow-repeat"></i> Проверить все
             </button>
         </form>
+        
         <a href="{{ url_for('add_key') }}" class="btn btn-primary">
             <i class="bi bi-plus"></i> Добавить ключ
         </a>
@@ -56,21 +58,32 @@
                 {% if key.description %}
                 <p class="card-text small">{{ key.description }}</p>
                 {% endif %}
-                <div class="mt-3">
+                
+                <!-- Кнопки действий -->
+                <div class="mt-3 d-flex gap-2 flex-wrap">
                     {% if key.is_active %}
                     <a href="{{ url_for('key_detail', key_id=key.id) }}" class="btn btn-sm btn-primary">
                         <i class="bi bi-eye"></i> Подробнее
                     </a>
-                    <button class="btn btn-sm btn-outline-danger" onclick="confirmDelete({{ key.id }}, '{{ key.name }}')">
-                        <i class="bi bi-trash"></i> Удалить
-                    </button>
+                    <form method="POST" action="{{ url_for('delete_key', key_id=key.id) }}" class="d-inline" 
+                          onsubmit="return confirmDelete({{ key.id }}, '{{ key.name }}')">
+                        <button type="submit" class="btn btn-sm btn-outline-danger">
+                            <i class="bi bi-trash"></i> Удалить
+                        </button>
+                    </form>
                     {% else %}
-                    <button class="btn btn-sm btn-success" onclick="confirmRestore({{ key.id }}, '{{ key.name }}')">
-                        <i class="bi bi-arrow-clockwise"></i> Восстановить
-                    </button>
-                    <button class="btn btn-sm btn-outline-danger" onclick="confirmDeletePermanent({{ key.id }}, '{{ key.name }}')">
-                        <i class="bi bi-trash"></i> Удалить навсегда
-                    </button>
+                    <form method="POST" action="{{ url_for('restore_key', key_id=key.id) }}" class="d-inline">
+                        <button type="submit" class="btn btn-sm btn-success" 
+                                onclick="return confirm('Восстановить ключ \"{{ key.name }}\"?')">
+                            <i class="bi bi-arrow-clockwise"></i> Восстановить
+                        </button>
+                    </form>
+                    <form method="POST" action="{{ url_for('delete_key', key_id=key.id) }}" class="d-inline"
+                          onsubmit="return confirm('⚠️ ВНИМАНИЕ! Вы собираетесь НАВСЕГДА удалить ключ \"{{ key.name }}\". Это действие НЕОБРАТИМО!')">
+                        <button type="submit" class="btn btn-sm btn-outline-danger">
+                            <i class="bi bi-trash"></i> Удалить навсегда
+                        </button>
+                    </form>
                     {% endif %}
                 </div>
             </div>
@@ -88,37 +101,12 @@
     </a>
 </div>
 {% endif %}
-
-<!-- Формы для действий -->
-<form id="deleteForm" method="POST" style="display:none;"></form>
-<form id="restoreForm" method="POST" style="display:none;"></form>
-<form id="deletePermanentForm" method="POST" style="display:none;"></form>
 {% endblock %}
 
 {% block scripts %}
 <script>
 function confirmDelete(keyId, keyName) {
-    if (confirm(`Вы действительно хотите удалить ключ "${keyName}"?\n\nЭто действие удалит ключ из базы данных и все связанные с ним данные (товары, отметки, логи).`)) {
-        const form = document.getElementById('deleteForm');
-        form.action = `/keys/${keyId}/delete`;
-        form.submit();
-    }
-}
-
-function confirmRestore(keyId, keyName) {
-    if (confirm(`Восстановить ключ "${keyName}"?\n\nКлюч снова станет активным и появится в списке.`)) {
-        const form = document.getElementById('restoreForm');
-        form.action = `/keys/${keyId}/restore`;
-        form.submit();
-    }
-}
-
-function confirmDeletePermanent(keyId, keyName) {
-    if (confirm(`⚠️ ВНИМАНИЕ! Вы собираетесь НАВСЕГДА удалить ключ "${keyName}".\n\nЭто действие НЕОБРАТИМО! Ключ будет полностью удалён из базы данных вместе со всеми связанными данными.\n\nПродолжить?`)) {
-        const form = document.getElementById('deletePermanentForm');
-        form.action = `/keys/${keyId}/delete`;
-        form.submit();
-    }
+    return confirm(`Вы действительно хотите удалить ключ "${keyName}"?\n\nЭто действие удалит ключ из базы данных и все связанные с ним данные (товары, отметки, логи).`);
 }
 </script>
 {% endblock %}

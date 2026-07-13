@@ -16,20 +16,26 @@ class ProductService:
     BASE_URL = 'https://content-api.wildberries.ru'
     
     @staticmethod
-    def _execute_with_retry(func, retries=3, delay=1):
+    def _execute_with_retry(func, retries=5, delay=1):
         """Выполняет функцию с повторными попытками при ошибках соединения с БД"""
         for attempt in range(retries):
             try:
                 return func()
             except (OperationalError, DisconnectionError) as e:
                 error_str = str(e).lower()
-                if 'ssl syscall error' in error_str or 'eof detected' in error_str or 'connection' in error_str:
+                # Расширенный список ошибок соединения
+                if any(err in error_str for err in [
+                    'ssl syscall error', 'eof detected', 'connection', 
+                    'network', 'timeout', 'closed', 'reset'
+                ]):
                     logger.warning(f"Database connection error (attempt {attempt+1}/{retries}): {e}")
                     if attempt < retries - 1:
                         db.session.rollback()
-                        time.sleep(delay * (attempt + 1))
+                        # Экспоненциальная задержка: 1, 2, 4, 8, 16 секунд
+                        time.sleep(delay * (2 ** attempt))
                         continue
                     else:
+                        logger.error(f"Database connection error after {retries} attempts: {e}")
                         raise
                 else:
                     raise
@@ -117,16 +123,25 @@ class ProductService:
                     cursor = data.get('cursor', {})
                     
                     for card in cards:
-                        # Извлекаем категорию из характеристик
+                        # Извлекаем категорию из характеристик с улучшенной логикой
                         category = ''
+                        
+                        # Ищем категорию в характеристиках
                         for char in card.get('characteristics', []):
-                            if char.get('name', '').lower() == 'категория':
+                            char_name = char.get('name', '').lower()
+                            # Проверяем разные варианты названия категории
+                            if char_name in ['категория', 'category', 'категория товара', 'категория товаров']:
                                 values = char.get('value', [])
-                                if values and isinstance(values, list):
-                                    category = values[0] if values else ''
-                                elif isinstance(values, str):
-                                    category = values
-                                break
+                                if values:
+                                    if isinstance(values, list) and values:
+                                        category = values[0] if values else ''
+                                    elif isinstance(values, str):
+                                        category = values
+                                    break
+                        
+                        # Если категория не найдена в характеристиках, пробуем взять из subjectName
+                        if not category:
+                            category = card.get('subjectName', '')
                         
                         all_products.append({
                             'nm_id': card.get('nmID'),

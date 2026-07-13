@@ -9,7 +9,7 @@
         <small class="text-muted">
             Ключ: {{ key_name }} 
             {% if last_update %}
-            | Обновлено: {{ last_update.strftime('%d.%m.%Y %H:%M') }}
+            | Обновлено: {{ last_update.strftime('%d.%m.%Y %H:%M') if last_update else '—' }}
             {% endif %}
         </small>
     </div>
@@ -57,6 +57,36 @@
     </div>
 </div>
 
+<!-- Статус фоновой задачи -->
+{% if task_info %}
+<div class="alert alert-info mb-4">
+    <div class="d-flex justify-content-between align-items-center">
+        <div>
+            <strong>Статус обновления:</strong> {{ task_info.message }}
+            {% if task_info.progress %}
+            <div class="progress mt-2" style="height: 20px; width: 300px;">
+                <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                     role="progressbar" 
+                     style="width: {{ task_info.progress }}%;" 
+                     aria-valuenow="{{ task_info.progress }}" 
+                     aria-valuemin="0" 
+                     aria-valuemax="100">
+                    {{ task_info.progress }}%
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% if task_info.status == 'completed' %}
+        <span class="badge bg-success">Готово</span>
+        {% elif task_info.status == 'running' %}
+        <span class="badge bg-primary">Выполняется</span>
+        {% elif task_info.status == 'error' %}
+        <span class="badge bg-danger">Ошибка</span>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <!-- Таблица товаров -->
 <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center">
@@ -90,7 +120,7 @@
                                    onclick="toggleProduct({{ product.id }}, this)">
                         </td>
                         <td><code>{{ product.nm_id }}</code></td>
-                        <td>{{ product.title|truncate(50) }}</td>
+                        <td>{{ product.title|truncate(50) if product.title else '—' }}</td>
                         <td>{{ product.vendor_code or '—' }}</td>
                         <td>{{ product.brand or '—' }}</td>
                         <td>{{ product.category or '—' }}</td>
@@ -121,7 +151,6 @@ function toggleProduct(productId, checkbox) {
     const form = document.getElementById('toggleForm');
     form.action = `/products/toggle/${productId}`;
     
-    // Показываем индикатор загрузки
     checkbox.disabled = true;
     checkbox.checked = !checkbox.checked;
     
@@ -141,7 +170,6 @@ function toggleProduct(productId, checkbox) {
             alert(data.message);
             checkbox.checked = !checkbox.checked;
         }
-        // Обновляем счётчик
         updateCounter();
     })
     .catch(error => {
@@ -167,7 +195,20 @@ function updateCounter() {
     document.querySelector('.card-header .text-muted').textContent = `Отмечено: ${checked}`;
 }
 
-// Периодическое обновление счётчика
-setInterval(updateCounter, 5000);
+// Автообновление статуса задачи
+{% if task_id %}
+function checkTaskStatus() {
+    fetch(`/products/status?task_id={{ task_id }}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'completed' || data.status === 'error') {
+                location.reload();
+            }
+        })
+        .catch(() => {});
+}
+
+setInterval(checkTaskStatus, 5000);
+{% endif %}
 </script>
 {% endblock %}
