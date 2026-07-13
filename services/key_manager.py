@@ -12,20 +12,26 @@ class KeyManager:
     """Сервис для управления API ключами"""
     
     @staticmethod
-    def _execute_with_retry(func, retries=3, delay=1):
+    def _execute_with_retry(func, retries=5, delay=1):
         """Выполняет функцию с повторными попытками при ошибках соединения с БД"""
         for attempt in range(retries):
             try:
                 return func()
             except (OperationalError, DisconnectionError) as e:
                 error_str = str(e).lower()
-                if 'ssl syscall error' in error_str or 'eof detected' in error_str or 'connection' in error_str:
+                # Расширенный список ошибок соединения
+                if any(err in error_str for err in [
+                    'ssl syscall error', 'eof detected', 'connection', 
+                    'network', 'timeout', 'closed', 'reset'
+                ]):
                     logger.warning(f"Database connection error (attempt {attempt+1}/{retries}): {e}")
                     if attempt < retries - 1:
                         db.session.rollback()
-                        time.sleep(delay * (attempt + 1))
+                        # Экспоненциальная задержка: 1, 2, 4, 8, 16 секунд
+                        time.sleep(delay * (2 ** attempt))
                         continue
                     else:
+                        logger.error(f"Database connection error after {retries} attempts: {e}")
                         raise
                 else:
                     raise
