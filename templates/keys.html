@@ -37,8 +37,8 @@
                     <a href="{{ url_for('key_detail', key_id=key.id) }}" class="btn btn-sm btn-primary">
                         <i class="bi bi-eye"></i> Подробнее
                     </a>
-                    <button class="btn btn-sm btn-outline-danger" onclick="confirmDelete({{ key.id }})">
-                        <i class="bi bi-trash"></i>
+                    <button class="btn btn-sm btn-outline-danger" onclick="confirmDelete({{ key.id }}, '{{ key.name }}')">
+                        <i class="bi bi-trash"></i> Удалить
                     </button>
                 </div>
             </div>
@@ -63,8 +63,8 @@
 
 {% block scripts %}
 <script>
-function confirmDelete(keyId) {
-    if (confirm('Вы уверены, что хотите удалить этот ключ?')) {
+function confirmDelete(keyId, keyName) {
+    if (confirm(`Вы действительно хотите удалить ключ "${keyName}"?\n\nЭто действие удалит ключ из базы данных и все связанные с ним данные (товары, отметки, логи).`)) {
         const form = document.createElement('form');
         form.method = 'POST';
         form.action = `/keys/${keyId}/delete`;

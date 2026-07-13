@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
-from models import db, WBApiKey, WBProduct, SelectedProduct
+from models import db, WBApiKey, WBProduct, SelectedProduct, WBApiLog
 from services.key_manager import KeyManager
 from services.wb_api import WBApiService
 from services.product_service import ProductService
@@ -43,9 +43,16 @@ def index():
 
 @app.route('/keys')
 def keys_list():
-    """Управление ключами - список всех ключей"""
-    keys = KeyManager.get_all_keys()
+    """Управление ключами - список всех ключей (только активные)"""
+    keys = KeyManager.get_all_keys(include_inactive=False)
     return render_template('keys.html', keys=keys)
+
+
+@app.route('/keys/all')
+def keys_all():
+    """Управление ключами - список всех ключей (включая неактивные)"""
+    keys = KeyManager.get_all_keys(include_inactive=True)
+    return render_template('keys.html', keys=keys, show_inactive=True)
 
 
 @app.route('/keys/add', methods=['GET', 'POST'])
@@ -96,15 +103,23 @@ def check_key(key_id):
 
 @app.route('/keys/<int:key_id>/delete', methods=['POST'])
 def delete_key(key_id):
-    """Удаление ключа"""
-    success, message = KeyManager.delete_key(key_id)
+    """Полное удаление ключа из базы данных"""
+    success, message = KeyManager.delete_key_permanently(key_id)
+    flash(message, 'success' if success else 'danger')
+    return redirect(url_for('keys_list'))
+
+
+@app.route('/keys/<int:key_id>/restore', methods=['POST'])
+def restore_key(key_id):
+    """Восстановление удалённого (неактивного) ключа"""
+    success, message = KeyManager.restore_key(key_id)
     flash(message, 'success' if success else 'danger')
     return redirect(url_for('keys_list'))
 
 
 @app.route('/keys/check-all', methods=['POST'])
 def check_all_keys():
-    """Проверка всех ключей"""
+    """Проверка всех активных ключей"""
     results = KeyManager.check_all_keys()
     success_count = sum(1 for r in results.values() if r['success'])
     flash(f'Проверено {len(results)} ключей. Успешно: {success_count}, Ошибок: {len(results) - success_count}', 'info')
@@ -117,7 +132,7 @@ def check_all_keys():
 def products():
     """Управление товарами"""
     # Проверяем, есть ли у пользователя активный ключ с доступом к Контенту
-    keys = KeyManager.get_all_keys()
+    keys = KeyManager.get_all_keys(include_inactive=False)
     if not keys:
         flash('Необходимо добавить API ключ для работы с товарами', 'warning')
         return redirect(url_for('keys_list'))

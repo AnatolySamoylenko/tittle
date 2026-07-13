@@ -1,4 +1,4 @@
-from models import db, WBApiKey, WBApiLog
+from models import db, WBApiKey, WBApiLog, WBProduct, SelectedProduct
 from services.wb_api import WBApiService
 from datetime import datetime
 import logging
@@ -13,10 +13,15 @@ class KeyManager:
     def add_key(key: str, name: str, description: str = '') -> Tuple[bool, str, Optional[WBApiKey]]:
         """Добавление нового ключа"""
         try:
-            # Проверяем, не существует ли уже такой ключ
+            # Проверяем, не существует ли уже такой ключ (по значению)
             existing = WBApiKey.query.filter_by(key=key).first()
             if existing:
-                return False, "Ключ с таким значением уже существует", None
+                # Если ключ найден, проверяем, активен ли он
+                if existing.is_active:
+                    return False, f"Ключ с таким значением уже существует (ID: {existing.id}, название: '{existing.name}')", None
+                else:
+                    # Если ключ неактивен, предлагаем его восстановить
+                    return False, f"Ключ с таким значением существует, но помечен как неактивный (ID: {existing.id}). Используйте восстановление или удалите его.", None
             
             # Получаем информацию о ключе
             wb_api = WBApiService(key)
@@ -27,7 +32,8 @@ class KeyManager:
                 name=name,
                 description=description,
                 token_type=token_info.get('token_type', 'unknown'),
-                access_info=token_info
+                access_info=token_info,
+                is_active=True
             )
             
             db.session.add(new_key)
@@ -44,38 +50,103 @@ class KeyManager:
             return False, f"Ошибка при добавлении ключа: {str(e)}", None
     
     @staticmethod
-    def get_all_keys() -> List[WBApiKey]:
+    def get_all_keys(include_inactive: bool = False) -> List[WBApiKey]:
         """Получение всех ключей"""
+        if include_inactive:
+            return WBApiKey.query.order_by(WBApiKey.created_at.desc()).all()
         return WBApiKey.query.filter_by(is_active=True).order_by(WBApiKey.created_at.desc()).all()
     
     @staticmethod
     def get_key(key_id: int) -> Optional[WBApiKey]:
-        """Получение ключа по ID"""
-        return WBApiKey.query.get(key_id)
+        """Получение ключа по ID (только активные)"""
+        return WBApiKey.query.filter_by(id=key_id, is_active=True).first()
     
     @staticmethod
-    def delete_key(key_id: int) -> Tuple[bool, str]:
-        """Удаление ключа (мягкое удаление)"""
+    def get_key_by_value(key: str) -> Optional[WBApiKey]:
+        """Получение ключа по значению"""
+        return WBApiKey.query.filter_by(key=key).first()
+    
+    @staticmethod
+    def delete_key_permanently(key_id: int) -> Tuple[bool, str]:
+        """Полное удаление ключа из базы данных"""
         try:
             key = WBApiKey.query.get(key_id)
             if not key:
                 return False, "Ключ не найден"
             
-            key.is_active = False
+            # Удаляем отметки товаров для этого ключа
+            SelectedProduct.query.filter_by(key_id=key_id).delete()
+            
+            # Удаляем товары, которые не используются другими ключами
+            products = WBProduct.query.filter_by(key_id=key_id).all()
+            for product in products:
+                # Проверяем, есть ли у товара другие отметки
+                other_selections = SelectedProduct.query.filter_by(product_id=product.id).filter(SelectedProduct.key_id != key_id).first()
+                if not other_selections:
+                    db.session.delete(product)
+                else:
+                    product.key_id = None
+            
+            # Удаляем логи для этого ключа
+            WBApiLog.query.filter_by(key_id=key_id).delete()
+            
+            # Удаляем сам ключ
+            db.session.delete(key)
             db.session.commit()
-            return True, "Ключ успешно удален"
+            return True, "Ключ успешно удалён из базы данных"
+            
         except Exception as e:
             db.session.rollback()
             logger.error(f"Error deleting key: {e}")
             return False, f"Ошибка при удалении ключа: {str(e)}"
     
     @staticmethod
+    def restore_key(key_id: int) -> Tuple[bool, str]:
+        """Восстановление удалённого (неактивного) ключа"""
+        try:
+            key = WBApiKey.query.get(key_id)
+            if not key:
+                return False, "Ключ не найден"
+            
+            if key.is_active:
+                return False, "Ключ уже активен"
+            
+            key.is_active = True
+            db.session.commit()
+            return True, "Ключ успешно восстановлен"
+            
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Error restoring key: {e}")
+            return False, f"Ошибка при восстановлении ключа: {str(e)}"
+    
+    @staticmethod
+    def deactivate_key(key_id: int) -> Tuple[bool, str]:
+        """Мягкое удаление (деактивация) ключа"""
+        try:
+            key = WBApiKey.query.get(key_id)
+            if not key:
+                return False, "Ключ не найден"
+            
+            if not key.is_active:
+                return False, "Ключ уже неактивен"
+            
+            key.is_active = False
+            db.session.commit()
+            return True, "Ключ деактивирован (скрыт из списка)"
+            
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Error deactivating key: {e}")
+            return False, f"Ошибка при деактивации ключа: {str(e)}"
+    
+    @staticmethod
     def check_key_connection(key_id: int) -> Tuple[bool, str, Optional[Dict]]:
         """Проверка подключения по ключу"""
         try:
             key = WBApiKey.query.get(key_id)
-            if not key:
-                return False, "Ключ не найден", None
+            if not key or not key.is_active:
+                return False, "Ключ не найден или неактивен", None
             
             wb_api = WBApiService(key.key)
             
@@ -105,9 +176,9 @@ class KeyManager:
     
     @staticmethod
     def check_all_keys() -> Dict[int, Dict]:
-        """Проверка всех ключей"""
+        """Проверка всех активных ключей"""
         results = {}
-        keys = KeyManager.get_all_keys()
+        keys = KeyManager.get_all_keys(include_inactive=False)
         
         for key in keys:
             success, message, details = KeyManager.check_key_connection(key.id)
