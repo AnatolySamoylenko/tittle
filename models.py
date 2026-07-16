@@ -12,25 +12,21 @@ class WBApiKey(db.Model):
     key = db.Column(db.String(500), nullable=False, unique=True)
     name = db.Column(db.String(200), nullable=False)
     description = db.Column(db.String(500))
-    token_type = db.Column(db.String(50))  # personal, service, base, test
+    token_type = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_checked = db.Column(db.DateTime)
     is_active = db.Column(db.Boolean, default=True)
-    
-    # Храним информацию о доступах в JSON
     access_info = db.Column(db.JSON, default=dict)
     
-    # Связи с другими таблицами
     products = db.relationship('WBProduct', backref='key', lazy='dynamic')
-    selections = db.relationship('SelectedProduct', backref='key', lazy='dynamic')
+    selected_products = db.relationship('SelectedProduct', backref='key', lazy='dynamic')
     logs = db.relationship('WBApiLog', backref='key', lazy='dynamic')
     
     def __repr__(self):
         return f'<WBApiKey {self.name}>'
     
     def to_dict(self):
-        """Преобразование в словарь для отображения"""
         return {
             'id': self.id,
             'name': self.name,
@@ -52,7 +48,7 @@ class WBApiLog(db.Model):
     endpoint = db.Column(db.String(200))
     method = db.Column(db.String(10))
     status_code = db.Column(db.Integer)
-    response_time = db.Column(db.Float)  # в секундах
+    response_time = db.Column(db.Float)
     error_message = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -61,24 +57,22 @@ class WBApiLog(db.Model):
 
 
 class WBProduct(db.Model):
-    """Модель для хранения товаров из Wildberries"""
+    """Модель для хранения товаров из Wildberries (основная информация)"""
     __tablename__ = 'wb_products'
     
     id = db.Column(db.Integer, primary_key=True)
-    nm_id = db.Column(db.BigInteger, unique=True, nullable=False)  # Артикул WB
-    vendor_code = db.Column(db.String(100))  # Артикул продавца
-    title = db.Column(db.String(500))  # Наименование товара
-    brand = db.Column(db.String(200))  # Бренд
-    subject_name = db.Column(db.String(200))  # Предмет (subjectName из API)
-    subject_id = db.Column(db.Integer)  # ID предмета
-    imt_id = db.Column(db.BigInteger)  # ID объединённой карточки
+    nm_id = db.Column(db.BigInteger, unique=True, nullable=False)
+    vendor_code = db.Column(db.String(100))
+    title = db.Column(db.String(500))
+    brand = db.Column(db.String(200))
+    subject_name = db.Column(db.String(200))
+    subject_id = db.Column(db.Integer)
+    imt_id = db.Column(db.BigInteger)
     updated_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Связь с ключом
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'))
     
-    # Связь с отметками
+    # Связь с отмеченными товарами
     selections = db.relationship('SelectedProduct', backref='product', lazy='dynamic')
     
     def __repr__(self):
@@ -101,28 +95,26 @@ class WBProduct(db.Model):
 
 
 class SelectedProduct(db.Model):
-    """Модель для хранения отмеченных товаров"""
+    """Модель для хранения ОТМЕЧЕННЫХ товаров (только nm_id и key_id)"""
     __tablename__ = 'selected_products'
     
     id = db.Column(db.Integer, primary_key=True)
-    product_id = db.Column(db.Integer, db.ForeignKey('wb_products.id'), nullable=False)
+    nm_id = db.Column(db.BigInteger, nullable=False)  # Артикул WB
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'), nullable=False)
     selected_at = db.Column(db.DateTime, default=datetime.utcnow)
-    note = db.Column(db.String(500))  # Примечание
     
+    # Уникальность: один товар может быть отмечен только один раз для одного ключа
     __table_args__ = (
-        db.UniqueConstraint('product_id', 'key_id', name='unique_product_key_selection'),
+        db.UniqueConstraint('nm_id', 'key_id', name='unique_selected_product'),
     )
     
     def __repr__(self):
-        return f'<SelectedProduct product={self.product_id} key={self.key_id}>'
+        return f'<SelectedProduct nm_id={self.nm_id} key={self.key_id}>'
     
     def to_dict(self):
         return {
             'id': self.id,
-            'product_id': self.product_id,
+            'nm_id': self.nm_id,
             'key_id': self.key_id,
-            'selected_at': self.selected_at.strftime('%Y-%m-%d %H:%M') if self.selected_at else None,
-            'note': self.note,
-            'product': self.product.to_dict() if self.product else None
+            'selected_at': self.selected_at.strftime('%Y-%m-%d %H:%M') if self.selected_at else None
         }

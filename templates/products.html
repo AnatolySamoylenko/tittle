@@ -129,6 +129,7 @@
                         <td>
                             <input type="checkbox" class="product-checkbox" 
                                    data-product-id="{{ product.id }}"
+                                   data-nm-id="{{ product.nm_id }}"
                                    {% if product.id in selected_ids %}checked{% endif %}
                                    onclick="toggleProduct({{ product.id }}, this)">
                         </td>
@@ -169,42 +170,57 @@ function toggleProduct(productId, checkbox) {
     const form = document.getElementById('toggleForm');
     form.action = `/products/toggle/${productId}`;
     
+    // Блокируем чекбокс на время запроса
     checkbox.disabled = true;
-    checkbox.checked = !checkbox.checked;
+    // Меняем состояние оптимистично
+    const newState = checkbox.checked;
+    checkbox.checked = !newState;
     
     fetch(form.action, {
         method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: new URLSearchParams({'key_id': '{{ key_id }}'})
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+            'key_id': '{{ key_id }}'
+        })
     })
     .then(response => response.json())
     .then(data => {
         checkbox.disabled = false;
         if (!data.success) {
+            // Если ошибка - возвращаем состояние обратно
+            checkbox.checked = newState;
             alert(data.message);
-            checkbox.checked = !checkbox.checked;
         }
         updateCounter();
     })
     .catch(error => {
         checkbox.disabled = false;
+        checkbox.checked = newState;
         alert('Ошибка при сохранении');
-        checkbox.checked = !checkbox.checked;
     });
 }
 
 function toggleAll() {
     const selectAll = document.getElementById('selectAll');
-    document.querySelectorAll('.product-checkbox').forEach(cb => {
-        if (cb.checked !== selectAll.checked) cb.click();
+    const checkboxes = document.querySelectorAll('.product-checkbox');
+    checkboxes.forEach(cb => {
+        if (cb.checked !== selectAll.checked) {
+            cb.click();
+        }
     });
 }
 
 function updateCounter() {
     const checked = document.querySelectorAll('.product-checkbox:checked').length;
-    document.querySelector('.card-header .text-muted').textContent = `Отмечено: ${checked}`;
+    const counterEl = document.querySelector('.card-header .text-muted');
+    if (counterEl) {
+        counterEl.textContent = `Отмечено: ${checked}`;
+    }
 }
 
+// Автообновление статуса задачи
 {% if task_id %}
 let reloadAttempts = 0;
 const maxReloadAttempts = 120;

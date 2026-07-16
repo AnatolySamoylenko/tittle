@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from models import db, WBProduct, SelectedProduct, WBApiKey
 from sqlalchemy.exc import OperationalError, DisconnectionError
+from sqlalchemy import and_
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -43,7 +44,7 @@ class ProductService:
     
     @staticmethod
     def get_products_from_wb(key_id: int, progress_callback=None) -> Tuple[bool, str, List[Dict]]:
-        """Получение списка товаров из API Wildberries с таймаутами и прогрессом"""
+        """Получение списка товаров из API Wildberries"""
         try:
             def get_key():
                 return WBApiKey.query.get(key_id)
@@ -131,7 +132,7 @@ class ProductService:
                             'vendor_code': card.get('vendorCode', ''),
                             'title': card.get('title', ''),
                             'brand': card.get('brand', ''),
-                            'subject_name': card.get('subjectName', ''),  # ИСПОЛЬЗУЕМ subjectName
+                            'subject_name': card.get('subjectName', ''),
                             'subject_id': card.get('subjectID'),
                             'imt_id': card.get('imtID'),
                             'updated_at': card.get('updatedAt')
@@ -163,7 +164,7 @@ class ProductService:
     
     @staticmethod
     def update_products_db(key_id: int, batch_size: int = 50, progress_callback=None) -> Tuple[bool, str]:
-        """Обновление товаров в базе данных с обработкой по частям и прогрессом"""
+        """Обновление товаров в базе данных"""
         try:
             if progress_callback:
                 progress_callback('start', 0, 'Начало обновления...')
@@ -247,7 +248,7 @@ class ProductService:
     
     @staticmethod
     def get_products_by_key(key_id: int, filters: Dict = None) -> List[WBProduct]:
-        """Получение товаров по ключу с фильтрацией"""
+        """Получение товаров по ключу с фильтрацией и проверкой отметок"""
         try:
             def query_products():
                 query = WBProduct.query.filter_by(key_id=key_id)
@@ -264,7 +265,17 @@ class ProductService:
                     if filters.get('subject_name'):
                         query = query.filter(WBProduct.subject_name.ilike(f"%{filters['subject_name']}%"))
                 
-                return query.order_by(WBProduct.nm_id).all()
+                products = query.order_by(WBProduct.nm_id).all()
+                
+                # Добавляем информацию об отметках для каждого товара
+                # Получаем все nm_id отмеченных товаров для этого ключа
+                selected_nm_ids = {sel.nm_id for sel in SelectedProduct.query.filter_by(key_id=key_id).all()}
+                
+                # Добавляем атрибут is_selected к каждому товару
+                for product in products:
+                    product.is_selected = product.nm_id in selected_nm_ids
+                
+                return products
             
             return ProductService._execute_with_retry(query_products)
             
@@ -274,25 +285,34 @@ class ProductService:
     
     @staticmethod
     def toggle_select(product_id: int, key_id: int) -> Tuple[bool, str]:
-        """Переключение статуса отметки товара"""
+        """
+        Переключение статуса отметки товара.
+        Отметка хранится в отдельной таблице SelectedProduct по nm_id
+        """
         try:
             def toggle():
+                # Проверяем, существует ли товар
                 product = WBProduct.query.get(product_id)
                 if not product:
                     return False, "Товар не найден"
                 
+                nm_id = product.nm_id
+                
+                # Проверяем, существует ли отметка для этого товара и ключа
                 selection = SelectedProduct.query.filter_by(
-                    product_id=product_id,
+                    nm_id=nm_id,
                     key_id=key_id
                 ).first()
                 
                 if selection:
+                    # Снимаем отметку - удаляем из таблицы
                     db.session.delete(selection)
                     db.session.commit()
                     return True, "Отметка снята"
                 else:
+                    # Добавляем отметку - создаём запись в таблице
                     new_selection = SelectedProduct(
-                        product_id=product_id,
+                        nm_id=nm_id,
                         key_id=key_id
                     )
                     db.session.add(new_selection)
@@ -308,7 +328,7 @@ class ProductService:
     
     @staticmethod
     def get_selected_products(key_id: int) -> List[SelectedProduct]:
-        """Получение отмеченных товаров для ключа"""
+        """Получение всех отмеченных товаров для ключа"""
         try:
             def query_selected():
                 return SelectedProduct.query.filter_by(key_id=key_id).all()
@@ -320,61 +340,31 @@ class ProductService:
             return []
     
     @staticmethod
-    def delete_products_for_key(key_id: int) -> Tuple[bool, str]:
-        """Удаление всех товаров для ключа с обработкой ошибок"""
+    def get_selected_nm_ids(key_id: int) -> List[int]:
+        """Получение списка nm_id отмеченных товаров для ключа"""
         try:
-            def delete_products():
-                products = WBProduct.query.filter_by(key_id=key_id).all()
-                deleted_count = 0
-                
-                for product in products:
-                    other_selections = SelectedProduct.query.filter_by(product_id=product.id).filter(SelectedProduct.key_id != key_id).first()
-                    if not other_selections:
-                        db.session.delete(product)
-                        deleted_count += 1
-                    else:
-                        product.key_id = None
-                
-                db.session.commit()
-                return True, f"Удалено товаров: {deleted_count}"
+            def query_selected_nm_ids():
+                selections = SelectedProduct.query.filter_by(key_id=key_id).all()
+                return [sel.nm_id for sel in selections]
             
-            return ProductService._execute_with_retry(delete_products)
+            return ProductService._execute_with_retry(query_selected_nm_ids)
             
         except Exception as e:
-            db.session.rollback()
-            logger.error(f"Error deleting products for key: {e}")
-            return False, f"Ошибка удаления товаров: {str(e)}"
+            logger.error(f"Error getting selected nm_ids: {e}")
+            return []
     
     @staticmethod
-    def get_products_count(key_id: int) -> int:
-        """Получение количества товаров для ключа"""
+    def is_product_selected(nm_id: int, key_id: int) -> bool:
+        """Проверка, отмечен ли товар"""
         try:
-            def query_count():
-                return WBProduct.query.filter_by(key_id=key_id).count()
+            def check_selected():
+                return SelectedProduct.query.filter_by(
+                    nm_id=nm_id,
+                    key_id=key_id
+                ).first() is not None
             
-            return ProductService._execute_with_retry(query_count)
-        except Exception as e:
-            logger.error(f"Error getting products count: {e}")
-            return 0
-    
-    @staticmethod
-    def get_products_stats(key_id: int) -> Dict[str, Any]:
-        """Получение статистики по товарам для ключа"""
-        try:
-            def query_stats():
-                total = WBProduct.query.filter_by(key_id=key_id).count()
-                selected = SelectedProduct.query.filter_by(key_id=key_id).count()
-                
-                last_product = WBProduct.query.filter_by(key_id=key_id).order_by(WBProduct.updated_at.desc()).first()
-                last_update = last_product.updated_at if last_product else None
-                
-                return {
-                    'total': total,
-                    'selected': selected,
-                    'last_update': last_update.strftime('%Y-%m-%d %H:%M:%S') if last_update else None
-                }
+            return ProductService._execute_with_retry(check_selected)
             
-            return ProductService._execute_with_retry(query_stats)
         except Exception as e:
-            logger.error(f"Error getting products stats: {e}")
-            return {'total': 0, 'selected': 0, 'last_update': None}
+            logger.error(f"Error checking product selected: {e}")
+            return False

@@ -24,6 +24,7 @@ SITE_PASSWORD = "Cjdtncbqcj.p"
 # Настройка базы данных
 database_url = os.environ.get('DATABASE_URL')
 if database_url:
+    # Добавляем параметры для стабильности соединения
     if '?' in database_url:
         database_url += '&sslmode=require&connect_timeout=10&keepalives_idle=60&keepalives_interval=10&keepalives_count=5&sslcompression=0'
     else:
@@ -35,6 +36,7 @@ if database_url:
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url or 'sqlite:///wb_keys.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# Настройки пула соединений
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
     'pool_recycle': 280,
@@ -81,12 +83,11 @@ def login():
         password = request.form.get('password', '')
         if password == SITE_PASSWORD:
             session['authenticated'] = True
-            session.permanent = True  # Сессия сохраняется до закрытия браузера
+            session.permanent = True
             flash('Доступ разрешён', 'success')
             return redirect(url_for('index'))
         else:
             flash('Неверный пароль. Попробуйте снова.', 'danger')
-            # При неправильном пароле остаёмся на странице входа
     
     return render_template('login.html')
 
@@ -316,6 +317,7 @@ def products():
         flash('Для доступа к управлению товарами необходим ключ с доступом к разделу "Контент"', 'danger')
         return redirect(url_for('index'))
     
+    # Фильтры
     filters = {
         'nm_id': request.args.get('nm_id', ''),
         'title': request.args.get('title', ''),
@@ -325,7 +327,12 @@ def products():
     }
     
     products = ProductService.get_products_by_key(content_key.id, filters)
-    selected_ids = [sel.product_id for sel in ProductService.get_selected_products(content_key.id)]
+    
+    # Получаем список ID отмеченных товаров для этого ключа
+    selected_ids = []
+    for product in products:
+        if product.is_selected:
+            selected_ids.append(product.id)
     
     last_update = None
     if products:
@@ -335,6 +342,7 @@ def products():
     task_info = task_status.get(task_id, {})
     progress_info = task_progress.get(task_id, {})
     
+    # Если задача завершена и есть task_id, перезагружаем без task_id
     if task_info.get('status') == 'completed' and task_id:
         return redirect(url_for('products'))
     
@@ -411,8 +419,12 @@ def selected_products():
         flash('Не указан ключ', 'danger')
         return redirect(url_for('products'))
     
-    selections = ProductService.get_selected_products(key_id)
-    products = [sel.product for sel in selections if sel.product]
+    # Получаем отмеченные товары из отдельной таблицы
+    selected_items = SelectedProduct.query.filter_by(key_id=key_id).all()
+    selected_nm_ids = [item.nm_id for item in selected_items]
+    
+    # Получаем полную информацию о товарах
+    products = WBProduct.query.filter(WBProduct.nm_id.in_(selected_nm_ids)).all()
     
     return render_template('selected_products.html', 
                          products=products,
@@ -451,7 +463,7 @@ def health():
 
 @app.errorhandler(404)
 def not_found(error):
-    # Если пользователь не авторизован, показываем страницу входа
+    """Страница не найдена"""
     if not session.get('authenticated'):
         return redirect(url_for('login'))
     return render_template('404.html'), 404
@@ -459,6 +471,7 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
+    """Внутренняя ошибка сервера"""
     db.session.rollback()
     logger.error(f"Internal server error: {error}")
     if not session.get('authenticated'):
@@ -468,7 +481,7 @@ def internal_error(error):
 
 @app.errorhandler(OperationalError)
 def handle_db_error(error):
-    """Обработчик ошибок базы данных"""
+    """Обработчик ошибок базы данных с попыткой восстановления"""
     db.session.rollback()
     logger.error(f"Database error: {error}")
     
