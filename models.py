@@ -72,8 +72,8 @@ class WBProduct(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'))
     
-    # Связь с отмеченными товарами
-    selections = db.relationship('SelectedProduct', backref='product', lazy='dynamic')
+    # УБИРАЕМ прямую связь с SelectedProduct через product_id
+    # Вместо этого будем использовать запросы к SelectedProduct по nm_id
     
     def __repr__(self):
         return f'<WBProduct {self.nm_id} - {self.title[:30] if self.title else "No title"}>'
@@ -89,8 +89,7 @@ class WBProduct(db.Model):
             'subject_id': self.subject_id,
             'imt_id': self.imt_id,
             'updated_at': self.updated_at.strftime('%Y-%m-%d %H:%M') if self.updated_at else None,
-            'created_at': self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else None,
-            'is_selected': bool(self.selections.first())
+            'created_at': self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else None
         }
 
 

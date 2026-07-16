@@ -248,7 +248,7 @@ class ProductService:
     
     @staticmethod
     def get_products_by_key(key_id: int, filters: Dict = None) -> List[WBProduct]:
-        """Получение товаров по ключу с фильтрацией и проверкой отметок"""
+        """Получение товаров по ключу с фильтрацией"""
         try:
             def query_products():
                 query = WBProduct.query.filter_by(key_id=key_id)
@@ -267,13 +267,13 @@ class ProductService:
                 
                 products = query.order_by(WBProduct.nm_id).all()
                 
-                # Добавляем информацию об отметках для каждого товара
                 # Получаем все nm_id отмеченных товаров для этого ключа
-                selected_nm_ids = {sel.nm_id for sel in SelectedProduct.query.filter_by(key_id=key_id).all()}
+                selected_nm_ids = ProductService.get_selected_nm_ids(key_id)
+                selected_set = set(selected_nm_ids)
                 
                 # Добавляем атрибут is_selected к каждому товару
                 for product in products:
-                    product.is_selected = product.nm_id in selected_nm_ids
+                    product.is_selected = product.nm_id in selected_set
                 
                 return products
             
@@ -327,11 +327,29 @@ class ProductService:
             return False, f"Ошибка: {str(e)}"
     
     @staticmethod
-    def get_selected_products(key_id: int) -> List[SelectedProduct]:
-        """Получение всех отмеченных товаров для ключа"""
+    def get_selected_products(key_id: int) -> List[Dict]:
+        """Получение всех отмеченных товаров для ключа с полной информацией"""
         try:
             def query_selected():
-                return SelectedProduct.query.filter_by(key_id=key_id).all()
+                # Получаем все отметки для ключа
+                selections = SelectedProduct.query.filter_by(key_id=key_id).all()
+                nm_ids = [sel.nm_id for sel in selections]
+                
+                if not nm_ids:
+                    return []
+                
+                # Получаем полную информацию о товарах
+                products = WBProduct.query.filter(WBProduct.nm_id.in_(nm_ids)).all()
+                
+                # Собираем результат
+                result = []
+                for product in products:
+                    result.append({
+                        'product': product,
+                        'selected_at': next((sel.selected_at for sel in selections if sel.nm_id == product.nm_id), None)
+                    })
+                
+                return result
             
             return ProductService._execute_with_retry(query_selected)
             

@@ -12,7 +12,7 @@
 
 <div class="card">
     <div class="card-header">
-        <i class="bi bi-list"></i> Всего отмечено: {{ products|length }}
+        <i class="bi bi-list"></i> Всего отмечено: {{ selected_data|length }}
     </div>
     <div class="card-body p-0">
         <div class="table-responsive">
@@ -23,22 +23,25 @@
                         <th>Наименование</th>
                         <th>Артикул продавца</th>
                         <th>Бренд</th>
-                        <th>Категория</th>
+                        <th>Предмет</th>
                         <th>Дата отметки</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for product in products %}
+                    {% for item in selected_data %}
                     <tr>
-                        <td><code>{{ product.nm_id }}</code></td>
-                        <td>{{ product.title|truncate(50) }}</td>
-                        <td>{{ product.vendor_code or '—' }}</td>
-                        <td>{{ product.brand or '—' }}</td>
-                        <td>{{ product.category or '—' }}</td>
+                        <td><code>{{ item.product.nm_id }}</code></td>
+                        <td>{{ item.product.title|truncate(50) if item.product.title else '—' }}</td>
+                        <td>{{ item.product.vendor_code or '—' }}</td>
+                        <td>{{ item.product.brand or '—' }}</td>
                         <td>
-                            {% set selection = product.selections|selectattr('key_id', 'equalto', key_id)|first %}
-                            {{ selection.selected_at.strftime('%d.%m.%Y %H:%M') if selection else '—' }}
+                            {% if item.product.subject_name %}
+                            <span class="badge bg-light text-dark">{{ item.product.subject_name }}</span>
+                            {% else %}
+                            <span class="text-muted">—</span>
+                            {% endif %}
                         </td>
+                        <td>{{ item.selected_at.strftime('%d.%m.%Y %H:%M') if item.selected_at else '—' }}</td>
                     </tr>
                     {% else %}
                     <tr>

@@ -331,7 +331,7 @@ def products():
     # Получаем список ID отмеченных товаров для этого ключа
     selected_ids = []
     for product in products:
-        if product.is_selected:
+        if hasattr(product, 'is_selected') and product.is_selected:
             selected_ids.append(product.id)
     
     last_update = None
@@ -419,15 +419,11 @@ def selected_products():
         flash('Не указан ключ', 'danger')
         return redirect(url_for('products'))
     
-    # Получаем отмеченные товары из отдельной таблицы
-    selected_items = SelectedProduct.query.filter_by(key_id=key_id).all()
-    selected_nm_ids = [item.nm_id for item in selected_items]
-    
-    # Получаем полную информацию о товарах
-    products = WBProduct.query.filter(WBProduct.nm_id.in_(selected_nm_ids)).all()
+    # Получаем отмеченные товары с полной информацией
+    selected_data = ProductService.get_selected_products(key_id)
     
     return render_template('selected_products.html', 
-                         products=products,
+                         selected_data=selected_data,
                          key_id=key_id)
 
 
