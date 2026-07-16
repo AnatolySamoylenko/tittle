@@ -30,6 +30,14 @@
             width: 24px;
             text-align: center;
         }
+        .sidebar .nav-link.text-danger:hover {
+            background: #dc3545;
+            color: white !important;
+        }
+        .sidebar hr {
+            border-color: rgba(255,255,255,0.1);
+            margin: 12px 16px;
+        }
         .main-content {
             padding: 30px;
             background: #f8f9fa;
@@ -81,6 +89,32 @@
         .token-type.service { background: #d4edda; color: #155724; }
         .token-type.base { background: #fff3cd; color: #856404; }
         .token-type.test { background: #f8d7da; color: #721c24; }
+        .spinner {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        /* Адаптивность для мобильных устройств */
+        @media (max-width: 768px) {
+            .sidebar {
+                min-height: auto;
+                padding: 10px 0;
+            }
+            .sidebar .nav-link {
+                padding: 8px 16px;
+                margin: 2px 8px;
+            }
+            .main-content {
+                padding: 15px;
+            }
+            .flash-messages {
+                max-width: 90%;
+                top: 10px;
+                right: 10px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -96,14 +130,18 @@
                     <a class="nav-link {% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index') }}">
                         <i class="bi bi-house"></i> Главная
                     </a>
-                    <a class="nav-link {% if request.endpoint == 'keys_list' or request.endpoint == 'add_key' %}active{% endif %}" href="{{ url_for('keys_list') }}">
+                    <a class="nav-link {% if request.endpoint == 'keys_list' or request.endpoint == 'add_key' or request.endpoint == 'keys_all' %}active{% endif %}" href="{{ url_for('keys_list') }}">
                         <i class="bi bi-key"></i> Настройки
                     </a>
                     <a class="nav-link {% if request.endpoint == 'advertising' %}active{% endif %}" href="{{ url_for('advertising') }}">
                         <i class="bi bi-megaphone"></i> Управление рекламой
                     </a>
-                    <a class="nav-link {% if request.endpoint == 'products' %}active{% endif %}" href="{{ url_for('products') }}">
+                    <a class="nav-link {% if request.endpoint == 'products' or request.endpoint == 'selected_products' %}active{% endif %}" href="{{ url_for('products') }}">
                         <i class="bi bi-box-seam"></i> Управление товарами
+                    </a>
+                    <hr>
+                    <a class="nav-link text-danger" href="{{ url_for('logout') }}">
+                        <i class="bi bi-box-arrow-right"></i> Выйти
                     </a>
                 </nav>
             </div>

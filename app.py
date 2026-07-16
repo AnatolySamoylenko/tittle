@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
 from models import db, WBApiKey, WBProduct, SelectedProduct, WBApiLog
 from services.key_manager import KeyManager
 from services.wb_api import WBApiService
@@ -18,10 +18,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
+# Пароль для доступа к сайту
+SITE_PASSWORD = "Cjdtncbqcj.p"
+
 # Настройка базы данных
 database_url = os.environ.get('DATABASE_URL')
 if database_url:
-    # Добавляем параметры для стабильности соединения
     if '?' in database_url:
         database_url += '&sslmode=require&connect_timeout=10&keepalives_idle=60&keepalives_interval=10&keepalives_count=5&sslcompression=0'
     else:
@@ -33,7 +35,6 @@ if database_url:
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url or 'sqlite:///wb_keys.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Настройки пула соединений
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
     'pool_recycle': 280,
@@ -53,6 +54,49 @@ with app.app_context():
 # Хранилище статусов фоновых задач
 task_status = {}
 task_progress = {}
+
+
+# ==================== ДЕКОРАТОР ЗАЩИТЫ ПАРОЛЕМ ====================
+
+def login_required(f):
+    """Декоратор для проверки авторизации"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('authenticated'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# ==================== МАРШРУТЫ АВТОРИЗАЦИИ ====================
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Страница входа с паролем"""
+    # Если пользователь уже авторизован, перенаправляем на главную
+    if session.get('authenticated'):
+        return redirect(url_for('index'))
+    
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        if password == SITE_PASSWORD:
+            session['authenticated'] = True
+            session.permanent = True  # Сессия сохраняется до закрытия браузера
+            flash('Доступ разрешён', 'success')
+            return redirect(url_for('index'))
+        else:
+            flash('Неверный пароль. Попробуйте снова.', 'danger')
+            # При неправильном пароле остаёмся на странице входа
+    
+    return render_template('login.html')
+
+
+@app.route('/logout')
+def logout():
+    """Выход из системы"""
+    session.pop('authenticated', None)
+    flash('Вы вышли из системы', 'info')
+    return redirect(url_for('login'))
 
 
 # ==================== ФОНОВАЯ ЗАДАЧА ====================
@@ -133,6 +177,7 @@ def db_retry(max_retries=5, delay=1):
 # ==================== ГЛАВНАЯ СТРАНИЦА ====================
 
 @app.route('/')
+@login_required
 @db_retry()
 def index():
     """Главная страница с меню"""
@@ -143,6 +188,7 @@ def index():
 # ==================== УПРАВЛЕНИЕ КЛЮЧАМИ ====================
 
 @app.route('/keys')
+@login_required
 @db_retry()
 def keys_list():
     """Управление ключами - список всех ключей (только активные)"""
@@ -151,6 +197,7 @@ def keys_list():
 
 
 @app.route('/keys/all')
+@login_required
 @db_retry()
 def keys_all():
     """Управление ключами - список всех ключей (включая неактивные)"""
@@ -159,6 +206,7 @@ def keys_all():
 
 
 @app.route('/keys/add', methods=['GET', 'POST'])
+@login_required
 @db_retry()
 def add_key():
     """Добавление нового ключа"""
@@ -183,6 +231,7 @@ def add_key():
 
 
 @app.route('/keys/<int:key_id>')
+@login_required
 @db_retry()
 def key_detail(key_id):
     """Детальная информация о ключе"""
@@ -196,6 +245,7 @@ def key_detail(key_id):
 
 
 @app.route('/keys/<int:key_id>/check', methods=['POST'])
+@login_required
 @db_retry()
 def check_key(key_id):
     """Проверка подключения по ключу"""
@@ -208,6 +258,7 @@ def check_key(key_id):
 
 
 @app.route('/keys/<int:key_id>/delete', methods=['POST'])
+@login_required
 @db_retry()
 def delete_key(key_id):
     """Полное удаление ключа из базы данных"""
@@ -220,6 +271,7 @@ def delete_key(key_id):
 
 
 @app.route('/keys/<int:key_id>/restore', methods=['POST'])
+@login_required
 @db_retry()
 def restore_key(key_id):
     """Восстановление удалённого (неактивного) ключа"""
@@ -229,6 +281,7 @@ def restore_key(key_id):
 
 
 @app.route('/keys/check-all', methods=['POST'])
+@login_required
 @db_retry()
 def check_all_keys():
     """Проверка всех активных ключей"""
@@ -241,6 +294,7 @@ def check_all_keys():
 # ==================== УПРАВЛЕНИЕ ТОВАРАМИ ====================
 
 @app.route('/products')
+@login_required
 @db_retry()
 def products():
     """Управление товарами"""
@@ -262,7 +316,6 @@ def products():
         flash('Для доступа к управлению товарами необходим ключ с доступом к разделу "Контент"', 'danger')
         return redirect(url_for('index'))
     
-    # Фильтры - теперь с subject_name вместо category
     filters = {
         'nm_id': request.args.get('nm_id', ''),
         'title': request.args.get('title', ''),
@@ -282,7 +335,6 @@ def products():
     task_info = task_status.get(task_id, {})
     progress_info = task_progress.get(task_id, {})
     
-    # Если задача завершена и есть task_id, перезагружаем без task_id
     if task_info.get('status') == 'completed' and task_id:
         return redirect(url_for('products'))
     
@@ -299,6 +351,7 @@ def products():
 
 
 @app.route('/products/update', methods=['POST'])
+@login_required
 @db_retry()
 def update_products():
     """Запуск обновления списка товаров в фоновом режиме"""
@@ -309,7 +362,6 @@ def update_products():
     
     task_id = f"update_{key_id}_{int(time.time())}"
     
-    # Запускаем обновление в фоновом потоке
     thread = threading.Thread(target=run_update_products, args=(key_id, task_id))
     thread.daemon = True
     thread.start()
@@ -319,6 +371,7 @@ def update_products():
 
 
 @app.route('/products/status')
+@login_required
 @db_retry()
 def products_status():
     """Проверка статуса обновления товаров"""
@@ -336,6 +389,7 @@ def products_status():
 
 
 @app.route('/products/toggle/<int:product_id>', methods=['POST'])
+@login_required
 @db_retry()
 def toggle_product(product_id):
     """Переключение отметки товара"""
@@ -348,6 +402,7 @@ def toggle_product(product_id):
 
 
 @app.route('/products/selected')
+@login_required
 @db_retry()
 def selected_products():
     """Список отмеченных товаров"""
@@ -367,6 +422,7 @@ def selected_products():
 # ==================== УПРАВЛЕНИЕ РЕКЛАМОЙ ====================
 
 @app.route('/advertising')
+@login_required
 @db_retry()
 def advertising():
     """Управление рекламой"""
@@ -377,7 +433,7 @@ def advertising():
 
 @app.route('/health')
 def health():
-    """Health check для Render с проверкой БД и восстановлением"""
+    """Health check для Render (без проверки пароля)"""
     try:
         db.session.execute('SELECT 1')
         return 'OK', 200
@@ -395,6 +451,9 @@ def health():
 
 @app.errorhandler(404)
 def not_found(error):
+    # Если пользователь не авторизован, показываем страницу входа
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
     return render_template('404.html'), 404
 
 
@@ -402,14 +461,19 @@ def not_found(error):
 def internal_error(error):
     db.session.rollback()
     logger.error(f"Internal server error: {error}")
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
     return render_template('500.html'), 500
 
 
 @app.errorhandler(OperationalError)
 def handle_db_error(error):
-    """Обработчик ошибок базы данных с попыткой восстановления"""
+    """Обработчик ошибок базы данных"""
     db.session.rollback()
     logger.error(f"Database error: {error}")
+    
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
     
     try:
         db.session.execute('SELECT 1')
@@ -424,6 +488,8 @@ def handle_db_error(error):
 def handle_bad_gateway(error):
     """Обработчик ошибки 502 Bad Gateway"""
     logger.error(f"502 Bad Gateway: {error}")
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
     flash('Сервер временно недоступен. Попробуйте позже.', 'danger')
     return redirect(url_for('index'))
 
