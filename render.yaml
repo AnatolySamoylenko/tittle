@@ -11,7 +11,7 @@ services:
         value: 3.11.0
       - key: DATABASE_URL
         fromDatabase:
-          name: wb-api-db
+          name: tittle_restart_db
           property: connectionString
       - key: SECRET_KEY
         generateValue: true
@@ -21,7 +21,38 @@ services:
         value: 2
       - key: GUNICORN_THREADS
         value: 2
+      - key: SCHEDULED_TASK_ENABLED
+        value: "true"
+      - key: SCHEDULED_TASK_MINUTE
+        value: "50"
+      - key: TIMEZONE
+        value: "Europe/Moscow"
+
+  # Cron-задача для синхронизации рекламных кампаний
+  # Запускается в 50 минут каждого часа
+  - type: cron
+    name: tittle_restart_50
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scheduler_50.py  # Изменено с scheduler.py
+    schedule: "50 * * * *"  # Запуск в 50 минут каждого часа (UTC)
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: tittle_restart_db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: CRONJOB_MODE
+        value: "true"
+      - key: TIMEZONE
+        value: "Europe/Moscow"
+      - key: TASK_NAME
+        value: "tittle_restart_50"
 
 databases:
-  - name: wb-api-db
+  - name: tittle_restart_db
     plan: free

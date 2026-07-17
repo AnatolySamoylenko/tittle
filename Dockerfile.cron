@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Устанавливаем зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем код приложения
+COPY . .
+
+# Устанавливаем переменные окружения
+ENV PYTHONUNBUFFERED=1
+ENV CRONJOB_MODE=true
+ENV TZ=Europe/Moscow
+ENV TASK_NAME=tittle_restart_50
+
+# Создаем пользователя для безопасности
+RUN adduser --disabled-password --gecos '' appuser
+USER appuser
+
+# Запускаем скрипт синхронизации (обновленное имя)
+CMD ["python", "scheduler_50.py"]
