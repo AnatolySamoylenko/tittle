@@ -97,11 +97,10 @@ class SelectedProduct(db.Model):
     __tablename__ = 'selected_products'
     
     id = db.Column(db.Integer, primary_key=True)
-    nm_id = db.Column(db.BigInteger, nullable=False)  # Артикул WB
+    nm_id = db.Column(db.BigInteger, nullable=False)
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'), nullable=False)
     selected_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Уникальность: один товар может быть отмечен только один раз для одного ключа
     __table_args__ = (
         db.UniqueConstraint('nm_id', 'key_id', name='unique_selected_product'),
     )
@@ -123,25 +122,33 @@ class AdvertCampaign(db.Model):
     __tablename__ = 'advert_campaigns'
     
     id = db.Column(db.Integer, primary_key=True)
-    campaign_id = db.Column(db.BigInteger, nullable=False)  # ID кампании в WB
+    campaign_id = db.Column(db.BigInteger, nullable=False)
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'), nullable=False)
     
-    name = db.Column(db.String(500))  # Название кампании
-    status = db.Column(db.Integer)  # Статус кампании (числовой код)
-    status_name = db.Column(db.String(50))  # Текстовое описание статуса
-    advert_type = db.Column(db.String(50))  # Тип кампании (manual/unified)
-    payment_type = db.Column(db.String(20))  # Тип оплаты (cpm/cpc)
+    name = db.Column(db.String(500))
+    status = db.Column(db.Integer)
+    status_name = db.Column(db.String(50))
+    advert_type = db.Column(db.String(50))
+    payment_type = db.Column(db.String(20))
     
-    is_active = db.Column(db.Boolean, default=True)  # Активна ли кампания
+    is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    last_synced = db.Column(db.DateTime, default=datetime.utcnow)  # Время последней синхронизации
+    last_synced = db.Column(db.DateTime, default=datetime.utcnow)
     
-    raw_data = db.Column(db.JSON, default=dict)  # Полные данные кампании в JSON
+    raw_data = db.Column(db.JSON, default=dict)
     
-    # Связи
-    nms = db.relationship('AdvertCampaignNM', backref='campaign', lazy='dynamic', 
-                          foreign_keys='AdvertCampaignNM.campaign_id')
+    # Исправленная связь с AdvertCampaignNM
+    # Используем primaryjoin для явного указания условия соединения
+    nms = db.relationship(
+        'AdvertCampaignNM',
+        primaryjoin='AdvertCampaign.campaign_id == AdvertCampaignNM.campaign_id',
+        foreign_keys='AdvertCampaignNM.campaign_id',
+        backref='campaign_ref',
+        lazy='dynamic',
+        viewonly=False,
+        overlaps='campaign_ref'
+    )
     
     __table_args__ = (
         db.UniqueConstraint('campaign_id', 'key_id', name='unique_campaign_key'),
@@ -168,7 +175,6 @@ class AdvertCampaign(db.Model):
         }
     
     def get_status_display(self):
-        """Возвращает человекочитаемое название статуса"""
         status_names = {
             -1: 'удалена',
             4: 'готова к запуску',
@@ -185,19 +191,22 @@ class AdvertCampaignNM(db.Model):
     __tablename__ = 'advert_campaign_nms'
     
     id = db.Column(db.Integer, primary_key=True)
-    campaign_id = db.Column(db.BigInteger, nullable=False)  # ID кампании в WB
-    nm_id = db.Column(db.BigInteger, nullable=False)  # Артикул товара
+    campaign_id = db.Column(db.BigInteger, nullable=False)
+    nm_id = db.Column(db.BigInteger, nullable=False)
     key_id = db.Column(db.Integer, db.ForeignKey('wb_api_keys.id'), nullable=False)
     
-    bids = db.Column(db.JSON, default=dict)  # Ставки для разных мест размещения
+    bids = db.Column(db.JSON, default=dict)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Связь с продуктом (опционально, для быстрого доступа к информации о товаре)
-    product = db.relationship('WBProduct', 
-                              foreign_keys=[nm_id],
-                              primaryjoin='WBProduct.nm_id == AdvertCampaignNM.nm_id',
-                              viewonly=True)
+    # Связь с продуктом (опционально)
+    product = db.relationship(
+        'WBProduct',
+        foreign_keys=[nm_id],
+        primaryjoin='WBProduct.nm_id == AdvertCampaignNM.nm_id',
+        viewonly=True,
+        uselist=False
+    )
     
     __table_args__ = (
         db.UniqueConstraint('campaign_id', 'nm_id', 'key_id', name='unique_campaign_nm_key'),
@@ -218,15 +227,6 @@ class AdvertCampaignNM(db.Model):
         }
     
     def get_bid_for_placement(self, placement: str) -> int:
-        """
-        Получить ставку для конкретного места размещения
-        
-        Args:
-            placement: 'search', 'recommendations', или 'combined'
-        
-        Returns:
-            Ставка в копейках или 0 если не найдена
-        """
         if not self.bids:
             return 0
         return self.bids.get(placement, 0)
